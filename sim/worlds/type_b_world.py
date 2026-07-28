@@ -1,4 +1,4 @@
-from sim.world import (
+from ..world import (
     World,
     WorldEdge,
 )
