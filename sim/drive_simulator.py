@@ -233,6 +233,7 @@ class CarSim:
         self.detect_dt = detect_dt
         self.throttle = throttle
         self.share = SimSharedData()
+        self._stopped_from: float | None = None
 
         self.mission = None
         self.history = History()
@@ -402,6 +403,21 @@ class CarSim:
             ):
                 print(f"!!!!!! time limit {self.mission.t_max}s: stop simulation")
                 break
+
+            if self.share.state.v == 0 and self.share.state.w == 0:
+                if self._stopped_from is None:
+                    self._stopped_from = self.share.state._t
+                else:
+                    if (
+                        self._stopped_from + self.mission.force_exit_stopping_sec
+                        < self.share.state._t
+                    ):
+                        print(
+                            f"!!!!!! force exit because stopping for {self.mission.force_exit_stopping_sec}sec"
+                        )
+                        break
+            else:
+                self._stopped_from = None
 
             elapsed_sim_time = (time.perf_counter() - t_start) * self.throttle
             if elapsed_sim_time < self.share.state._t + self.drive_dt:

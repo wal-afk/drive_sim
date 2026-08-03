@@ -7,50 +7,99 @@ import plotly.graph_objects as go
 from .drive_simulator import (
     CarSim,
     History,
+    MissionBase,
+)
+from .sign import DetectedSign
+from .goal import GoalLine, GoalCircle
+from .calc import (
+    Box,
+    vehicle_coord_to_world_coord,
+    calc_arc_points,
+    calc_fan_points,
+    calc_line_points,
 )
 
-from .goal import GoalLine, GoalCircle
-from .calc import Box, vehicle_coord_to_world_coord, calc_circle_points
 
+class MissionDrawer:
 
-class VehicleDrawer:
+    def __init__(self, mission: MissionBase):
+        if mission is None:
+            raise Exception("mission is not set")
 
-    def __init__(self, sim: CarSim):
         self.sign_size = 16
-        self.sim = sim
+        self.mission = mission
 
+        self.box = self._calc_axis_range()
+        self.start_scatters = self._create_start_scatters()
         self.world_scatters = self._create_world_scatters()
         self.sign_scatters = self._create_sign_scatters()
 
-    def show(self, draw_target_dt=0.1):
-        skip = int(draw_target_dt / self.sim.drive_dt)
-        draw_dt = self.sim.drive_dt * skip
-        fig = self.create_figure(self.sim.history.skip(skip), draw_dt)
+    def show(self):
+        fig = self.create_figure()
         fig.show()
+
+    def _create_start_scatters(self) -> list[go.Scatter]:
+        """
+        start地点を描画する為のscatterを作成する。
+        """
+        pos_points = self.mission.get_random_xy_box().get_points(
+            connect_end_to_start=True
+        )
+        pos_scatter = go.Scatter(
+            mode="lines",
+            x=pos_points[:, 0],
+            y=pos_points[:, 1],
+            fill="toself",
+            line={
+                "width": 3,
+                "color": "red",
+                "dash": "solid",
+            },
+            name="スタート地点",
+        )
+        angle_points = calc_fan_points(
+            self.mission.initial_xy,
+            0.3,
+            self.mission.initial_yaw_deg - self.mission.random_d_yaw_deg,
+            2 * self.mission.random_d_yaw_deg,
+        )
+        angle_scatter = go.Scatter(
+            mode="lines",
+            x=angle_points[:, 0],
+            y=angle_points[:, 1],
+            fill="toself",
+            line={
+                "width": 3,
+                "color": "pink",
+                "dash": "solid",
+            },
+            name="スタート角度",
+        )
+        return [pos_scatter, angle_scatter]
 
     def _create_world_scatters(self) -> list[go.Scatter]:
         """
         worldを描画する為のscatterを作成する。
         同じnameのsignを1グループにして1つのscatterにまとめる。
         """
-        if self.sim.mission is None:
-            raise Exception("mission is not set")
-
         world_scatters = []
-        for world_edge in self.sim.mission.world.edges:
-            common_args = {
-                "showlegend": False,
-                "mode": "lines",
-                "fill": "toself" if world_edge.fill else "none",
-                "line": {
-                    "width": world_edge.width,
-                    "color": world_edge.color,
-                    "dash": world_edge.dash,
-                },
-                "name": world_edge.name,
-            }
+        for world_edge in self.mission.world.edges:
             pts = world_edge.get_points()
-            world_scatters.append(go.Scatter(x=pts[:, 0], y=pts[:, 1], **common_args))
+            world_scatters.append(
+                go.Scatter(
+                    showlegend=False,
+                    mode="lines",
+                    x=pts[:, 0],
+                    y=pts[:, 1],
+                    fill="toself" if world_edge.fill else "none",
+                    line={
+                        "width": world_edge.width,
+                        "color": world_edge.color,
+                        "dash": world_edge.dash,
+                    },
+                    name=world_edge.name,
+                )
+            )
         return world_scatters
 
     def _create_sign_scatters(self) -> list[go.Scatter]:
@@ -58,14 +107,12 @@ class VehicleDrawer:
         signを描画する為のscatterを作成する。
         同じnameのsignを1グループにして1つのscatterにまとめる。
         """
-        if self.sim.mission is None:
-            raise Exception("mission is not set")
 
         unknown_symbol = ("?", "red")
         sign_scatters = []
-        for name in set([m.name for m in self.sim.mission.signs]):
-            target_signs = [m for m in self.sim.mission.signs if m.name == name]
-            symbol, color = self.sim.mission.sign_to_symbol.get(name, unknown_symbol)
+        for name in set([m.name for m in self.mission.signs]):
+            target_signs = [m for m in self.mission.signs if m.name == name]
+            symbol, color = self.mission.sign_to_symbol.get(name, unknown_symbol)
 
             common_args = {
                 "legendrank": 5,
@@ -100,13 +147,12 @@ class VehicleDrawer:
                 )
         return sign_scatters
 
-    def _create_detected_sign_scatters(
-        self, his: History, idx: int
+    def create_detected_sign_scatters(
+        self, detections: list[DetectedSign]
     ) -> tuple[go.Scatter, go.Scatter]:
         """
         検出されたsignを描画する為のscatterを作成する。
         """
-        detections = his.detections[idx]
 
         first = go.Scatter(
             legendrank=6,
@@ -136,17 +182,13 @@ class VehicleDrawer:
         )
         return first, others
 
-    def _create_goal_scatters(self, his: History, idx: int) -> list[go.Scatter]:
+    def create_goal_scatters(self, goal_cnt: int = 0) -> list[go.Scatter]:
         """
-        goalを描画する為のscatterを作成する。
+        到達済みかの判定と共にgoalを描画する為のscatterを作成する。
         """
-        if self.sim.mission is None:
-            raise Exception("mission is not set")
-
-        goal_cnt = his.goal_cnt[idx]
 
         scatters = []
-        for i, goal in enumerate(self.sim.mission.goals):
+        for i, goal in enumerate(self.mission.goals):
             color = "gray" if i > goal_cnt else ("gray" if i == goal_cnt else "pink")
             dash = "solid" if goal.should_stop else "dot"
 
@@ -158,26 +200,16 @@ class VehicleDrawer:
             }
 
             if isinstance(goal, GoalLine):
-                x = goal.xy[0]
-                y = goal.xy[1]
-                if y != 0:
-                    a = -x / y
-                    b = goal.norm2 / y
-                    scatters.append(
-                        go.Scatter(
-                            x=[self.box.min_x, self.box.max_x],
-                            y=[a * self.box.min_x + b, a * self.box.max_x + b],
-                            **common_args,
-                        )
+                points = calc_line_points(goal.xy, self.box)
+                scatters.append(
+                    go.Scatter(
+                        x=points[:, 0],
+                        y=points[:, 1],
+                        **common_args,
                     )
-                else:
-                    scatters.append(
-                        go.Scatter(
-                            x=[x, x], y=[self.box.min_y, self.box.max_y], **common_args
-                        )
-                    )
+                )
             elif isinstance(goal, GoalCircle):
-                points = calc_circle_points(goal.xy, goal.r)
+                points = calc_arc_points(goal.xy, goal.r)
                 scatters.append(
                     go.Scatter(
                         x=points[:, 0],
@@ -186,6 +218,48 @@ class VehicleDrawer:
                     )
                 )
         return scatters
+
+    def _calc_axis_range(self) -> Box:
+        signs_box = self.mission.signs_box
+        world_box = self.mission.world.get_bounding_box()
+        all_box = Box.merge([signs_box, world_box])
+        if all_box is None:
+            raise Exception("there is no data to draw")
+        return all_box
+
+    def create_figure(self, *, width=800, height=600) -> go.Figure:
+        fig = go.Figure(
+            data=[
+                *self.start_scatters,
+                *self.world_scatters,
+                *self.sign_scatters,
+                *self.create_goal_scatters(),
+            ],
+            layout=go.Layout(
+                width=width,
+                height=height,
+                xaxis={
+                    "scaleanchor": "y",
+                    "range": self.box.get_x_range(),
+                },
+                yaxis={"range": self.box.get_y_range()},
+            ),
+        )
+
+        return fig
+
+
+class SimDrawer:
+
+    def __init__(self, sim: CarSim):
+        self.sim = sim
+        self.mission_drawer = MissionDrawer(sim.mission)
+
+    def show(self, draw_target_dt=0.1):
+        skip = int(draw_target_dt / self.sim.drive_dt)
+        draw_dt = self.sim.drive_dt * skip
+        fig = self.create_figure(self.sim.history.skip(skip), draw_dt)
+        fig.show()
 
     def _create_trajectory_scatter(self, his: History, idx: int) -> go.Scatter:
         """
@@ -280,20 +354,39 @@ class VehicleDrawer:
         """
         if self.sim.mission is None:
             raise Exception("mission is not set")
-        return {
+
+        common_args = {
             "x": x,
             "y": y,
             "xanchor": "left",
             "yanchor": "top",
             "showarrow": False,
-            "text": "v={:.2f} m/s, w={:.2f} 度/s, goal {}/{} ".format(
-                his.vs[idx],
-                math.degrees(his.ws[idx]),
-                his.goal_cnt[idx],
-                len(self.sim.mission.goals),
-            ),
-            "font": {"size": 12, "color": "black"},
         }
+
+        if idx == len(his.ts) - 1:
+            goal_cnt = his.goal_cnt[idx]
+            goals = len(self.sim.mission.goals)
+
+            return {
+                "text": "{} goal {}/{} ".format(
+                    "👍成功" if goal_cnt == goals else "失敗",
+                    goal_cnt,
+                    goals,
+                ),
+                "font": {"size": 16, "color": "blue" if goal_cnt == goals else "red"},
+                **common_args,
+            }
+        else:
+            return {
+                "text": "v={:.2f} m/s, w={:.2f} 度/s, goal {}/{} ".format(
+                    his.vs[idx],
+                    math.degrees(his.ws[idx]),
+                    his.goal_cnt[idx],
+                    len(self.sim.mission.goals),
+                ),
+                "font": {"size": 12, "color": "black"},
+                **common_args,
+            }
 
     def _create_frames(
         self,
@@ -302,15 +395,15 @@ class VehicleDrawer:
         first_msg_xy = self.box.get_pos_rel(0, 1)
         second_msg_xy = self.box.get_pos_rel(0, 0.9)
 
-        fixed_top_trace_num = len(self.world_scatters)
+        fixed_top_trace_num = len(self.mission_drawer.world_scatters)
         frames = []
         for i in tqdm(range(len(his.xs))):
             data = [
                 self._create_trajectory_scatter(his, i),
                 self._create_vehicle_scatter(his, i),
                 self._create_camera_view_scatter(his, i),
-                *self._create_goal_scatters(his, i),
-                *self._create_detected_sign_scatters(his, i),
+                *self.mission_drawer.create_goal_scatters(his.goal_cnt[i]),
+                *self.mission_drawer.create_detected_sign_scatters(his.detections[i]),
             ]
             frames.append(
                 go.Frame(
@@ -370,22 +463,24 @@ class VehicleDrawer:
             ],
         }
 
-    def create_figure(self, his: History, frame_sec: float) -> go.Figure:
+    def create_figure(
+        self, his: History, frame_sec: float, *, width=800, height=600
+    ) -> go.Figure:
         self.box = self._calc_axis_range(his)
         fig = go.Figure(
             data=[
-                *self.world_scatters,
+                *self.mission_drawer.world_scatters,
                 self._create_trajectory_scatter(his, 0),
                 self._create_vehicle_scatter(his, 0),
                 self._create_camera_view_scatter(his, 0),
-                *self._create_goal_scatters(his, 0),
-                *self._create_detected_sign_scatters(his, 0),
-                *self.sign_scatters,
+                *self.mission_drawer.create_goal_scatters(),
+                *self.mission_drawer.create_detected_sign_scatters(his.detections[0]),
+                *self.mission_drawer.sign_scatters,
             ],
             frames=self._create_frames(his),
             layout=go.Layout(
-                width=600,
-                height=600,
+                width=width,
+                height=height,
                 xaxis={
                     "scaleanchor": "y",
                     "range": self.box.get_x_range(),

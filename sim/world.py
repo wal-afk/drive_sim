@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .calc import Box, calc_circle_points
+from .calc import Box, calc_arc_points
 
 
 class WorldEdge:
@@ -239,7 +239,7 @@ class WorldEdge:
     def _get_arc_points(self, i: int) -> np.ndarray:
         smaller_deg = self.arc_smaller_deg[i]
         bigger_deg = self.arc_bigger_deg[i]
-        points = calc_circle_points(
+        points = calc_arc_points(
             self.arc_center[i],
             self.arc_radius[i],
             smaller_deg,

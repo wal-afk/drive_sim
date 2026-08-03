@@ -5,13 +5,55 @@ from dataclasses import dataclass
 import numpy as np
 
 
-def calc_circle_points(
+def calc_line_points(xy: tuple[float, float], box: Box) -> np.ndarray:
+    """
+    直線をboxで区切った線分の端点を求める。傾きが有限の場合、box.min_xとbox.max_xの間の線分を求める
+    傾きが無限の場合、box.min_yとbox.max_yの間の線分を求める
+    Args:
+        xy: 直線に原点から降ろした垂線の足の座標
+        box: 直線を描画する範囲を指定するBox
+    """
+    x, y = xy
+    if y != 0:
+        norm2 = x**2 + y**2
+        a = -x / y
+        b = norm2 / y
+        return np.stack(
+            [[box.min_x, box.max_x], [a * box.min_x + b, a * box.max_x + b]], axis=1
+        )
+    else:
+        return np.stack([[x, x], [box.min_y, box.max_y]], axis=1)
+
+
+def calc_fan_points(
     xy: tuple[float, float],
     r: float,
     start_deg: float = 0,
     deg: float = 360,
 ) -> np.ndarray:
     """
+    扇形の点群を求める
+    Args:
+        xy: 円弧の中心座標
+        r: 円弧の半径
+        start_deg: 円弧の開始角度[deg]
+        deg: 反時計回りに進む円弧の角度[deg]
+    Returns:
+        扇形の座標点の列 shape=(N,2)を反時計回りに返す
+    """
+
+    arc_points = calc_arc_points(xy, r, start_deg, deg)
+    return np.concatenate([np.asarray([xy]), arc_points, np.asarray([xy])], axis=0)
+
+
+def calc_arc_points(
+    xy: tuple[float, float],
+    r: float,
+    start_deg: float = 0,
+    deg: float = 360,
+) -> np.ndarray:
+    """
+    円弧の点群を求める
     Args:
         xy: 円弧の中心座標
         r: 円弧の半径
@@ -74,6 +116,28 @@ class Box:
 
     def get_y_range(self) -> tuple[float, float]:
         return self.min_y, self.max_y
+
+    def get_points(self, *, connect_end_to_start: False) -> np.ndarray:
+        """
+        矩形の4点の座標を求める
+        Returns:
+            shape=(4,2)の矩形の4点の座標を返す
+        """
+        corners = [
+            [self.min_x, self.min_y],
+            [self.max_x, self.min_y],
+            [self.max_x, self.max_y],
+            [self.min_x, self.max_y],
+        ]
+        if connect_end_to_start:
+            return np.array(
+                [
+                    *corners,
+                    corners[0],
+                ]
+            )
+        else:
+            return np.array(corners)
 
     def get_pos_rel(self, x_ratio: float, y_ratio: float) -> tuple[float, float]:
         """

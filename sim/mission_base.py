@@ -16,13 +16,18 @@ class MissionBase:
         world: World,
         *,
         t_max: float | None = None,
+        randomize_initial_state: float = True,
+        force_exit_stopping_sec: float = 5.0,
     ):
         """
         Args:
             t_max: シミュレーションの最大時間[s]。Noneの場合は無制限
+            randomize_initial_state: 初期状態をランダム化するかどうか
         """
 
         self.t_max = t_max
+        self.randomize_initial_state = randomize_initial_state
+        self.force_exit_stopping_sec = force_exit_stopping_sec
 
         self.signs: list[Sign] = []
         self.signs_pos_world: np.ndarray = np.array([], dtype=np.float32)
@@ -32,11 +37,12 @@ class MissionBase:
         self.goals: list[GoalBase] = []
         self.world = world
 
+        # 変更可能な変数
         self.initial_cam_pitch_deg = 30  # 30度
-        self.initial_x = 0
-        self.initial_y = 0
+        self.initial_xy = (0, 0)
         self.initial_yaw_deg = 0
-        self.randomize_initial_state: bool = True
+        self.random_d_xy = (0.1, 0.1)
+        self.random_d_yaw_deg = 10.0
 
     def set_world(self, world: World):
         self.world = world
@@ -44,16 +50,34 @@ class MissionBase:
     def command_func(self):
         raise NotImplementedError("command_func must be implemented in subclass")
 
+    def get_random_xy_box(self) -> Box:
+        return Box(
+            self.initial_xy[0] - self.random_d_xy[0],
+            self.initial_xy[1] - self.random_d_xy[1],
+            self.initial_xy[0] + self.random_d_xy[0],
+            self.initial_xy[1] + self.random_d_xy[1],
+        )
+
     def get_initial_state(self) -> VehicleState:
-        d_x = np.random.uniform(-0.1, 0.1) if self.randomize_initial_state else 0
-        d_y = np.random.uniform(-0.1, 0.1) if self.randomize_initial_state else 0
+        d_x = (
+            np.random.uniform(-self.random_d_xy[0], self.random_d_xy[0])
+            if self.randomize_initial_state
+            else 0
+        )
+        d_y = (
+            np.random.uniform(-self.random_d_xy[1], self.random_d_xy[1])
+            if self.randomize_initial_state
+            else 0
+        )
         d_yaw_deg = (
-            np.random.uniform(-10.0, 10.0) if self.randomize_initial_state else 0
+            np.random.uniform(-self.random_d_yaw_deg, self.random_d_yaw_deg)
+            if self.randomize_initial_state
+            else 0
         )
 
         return VehicleState(
-            x=self.initial_x + d_x,
-            y=self.initial_y + d_y,
+            x=self.initial_xy[0] + d_x,
+            y=self.initial_xy[1] + d_y,
             yaw=math.radians(self.initial_yaw_deg + d_yaw_deg),
             cam_pitch=math.radians(self.initial_cam_pitch_deg),
         )
