@@ -85,7 +85,7 @@ class History:
             return Box(min(self.xs), min(self.ys), max(self.xs), max(self.ys))
 
 
-class SimSharedData:
+class ControllerSharedData:
     """
     コマンドスレッドとシミュレーションスレッドの間で共有する情報をまとめて管理する
     """
@@ -232,13 +232,15 @@ class CarSim:
         self.drive_dt = drive_dt
         self.detect_dt = detect_dt
         self.throttle = throttle
-        self.share = SimSharedData()
+        self.share = ControllerSharedData()
         self._stopped_from: float | None = None
 
         self.mission = None
         self.history = History()
         self.drive_stat = TimeStat()
         self.detect_stat = TimeStat()
+
+        self.com = Commander(self)
 
     def set_mission(
         self,
@@ -279,9 +281,10 @@ class CarSim:
                 if self.contains(poly, sign_pos_vehicle[0], sign_pos_vehicle[1]):
                     found.append(
                         DetectedSign(  # 車座標系での位置を設定する
-                            sign,
+                            name=sign.name,
                             x=sign_pos_vehicle[0],
                             y=sign_pos_vehicle[1],
+                            gt=sign,
                         )
                     )
         self.share.state._detection = sorted(found, key=lambda d: d.x)
@@ -448,7 +451,16 @@ class CarSim:
         if self.mission is None:
             raise Exception("mission is not set")
 
-        self.mission.command_func()
+        commands = {
+            "move": self.com.move,
+            "rotate": self.com.rotate,
+            "camera": self.com.camera,
+            "search": self.com.search,
+            "search_all": self.com.search_all,
+            "wait": self.com.wait,
+        }
+
+        self.mission.command_func(**commands)
         print(f"[{self.share.state._t:.3f}] command_func finished")
 
     def run(self):
@@ -463,7 +475,7 @@ class CarSim:
 
         self.share.reset(self.mission.get_initial_state())
 
-        command_thread = threading.Thread(target=self.mission.command_func)
+        command_thread = threading.Thread(target=self._call_command_func)
         sim_thread = threading.Thread(target=self._sim_all)
 
         try:

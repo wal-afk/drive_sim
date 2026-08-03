@@ -47,7 +47,8 @@ class MissionBase:
     def set_world(self, world: World):
         self.world = world
 
-    def command_func(self):
+    @staticmethod
+    def command_func(**kwargs):
         raise NotImplementedError("command_func must be implemented in subclass")
 
     def get_random_xy_box(self) -> Box:

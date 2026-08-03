@@ -156,8 +156,8 @@ class MissionDrawer:
 
         first = go.Scatter(
             legendrank=6,
-            x=[d.sign.x for d in detections[0:1]],
-            y=[d.sign.y for d in detections[0:1]],
+            x=[d.sign.x for d in detections[0:1] if d.sign is not None],
+            y=[d.sign.y for d in detections[0:1] if d.sign is not None],
             mode="markers",
             name="search",
             marker={
@@ -169,8 +169,8 @@ class MissionDrawer:
         )
         others = go.Scatter(
             legendrank=7,
-            x=[d.sign.x for d in detections[1:]],
-            y=[d.sign.y for d in detections[1:]],
+            x=[d.sign.x for d in detections[1:] if d.sign is not None],
+            y=[d.sign.y for d in detections[1:] if d.sign is not None],
             mode="markers",
             name="search_all",
             marker={
