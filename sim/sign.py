@@ -1,13 +1,36 @@
 from __future__ import annotations
-from dataclasses import dataclass
 import math
 
+import numpy as np
 
-@dataclass
+
 class Sign:
     x: float  # 世界座標系での位置
     y: float  # 世界座標系での位置
     name: str
+
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        name: str,
+        *,
+        dx: float = 0.0,
+        dy: float = 0.0,
+    ):
+        self.initial_x = x
+        self.initial_y = y
+        self.name = name
+        self.dx = dx
+        self.dy = dy
+
+        # 仮の値。relocateで最終決定される。
+        self.x = x
+        self.y = y
+
+    def relocate(self):
+        self.x = self.initial_x + np.random.uniform(-self.dx, self.dx)
+        self.y = self.initial_y + np.random.uniform(-self.dy, self.dy)
 
 
 class DetectedSign:

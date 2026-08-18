@@ -369,7 +369,11 @@ class SimDrawer:
 
             return {
                 "text": "{} goal {}/{} ".format(
-                    "👍成功" if goal_cnt == goals else "失敗",
+                    (
+                        "👍成功"
+                        if goal_cnt == goals
+                        else f"失敗(制限時間{self.sim.mission.t_max}秒)"
+                    ),
                     goal_cnt,
                     goals,
                 ),

@@ -51,9 +51,12 @@ class History:
         self.detections.append(state._detection)
         self.goal_cnt.append(state._goal_cnt)
 
-    def update_latest(self, v: float, w: float):
+    def update_latest_vw(self, v: float, w: float):
         self.vs[-1] = v
         self.ws[-1] = w
+
+    def update_latest_goal_cnt(self, goal_cnt: int):
+        self.goal_cnt[-1] = goal_cnt
 
     def skip(self, n: int) -> History:
         new_history = History()
@@ -108,13 +111,17 @@ class Commander:
         self.sim.share.commands.put(SpeedCommand(v=v, w=w_rad, t=t))
         if t is not None:
             self.sim.share.state._time_cmd_issued += 1
-        print(
-            f"[{self.sim.share.state._t:.3f}] put speed command v={v}, w={w_rad}, t={t}"
-        )
+        if self.sim.debug_log:
+            print(
+                f"[{self.sim.share.state._t:.3f}] put speed command v={v}, w={w_rad}, t={t}"
+            )
 
     def _send_camera_cmd(self, pitch_rad: float):
         self.sim.share.commands.put(CameraCommand(pitch_rad))
-        print(f"[{self.sim.share.state._t:.3f}] put camera command pitch={pitch_rad}")
+        if self.sim.debug_log:
+            print(
+                f"[{self.sim.share.state._t:.3f}] put camera command pitch={pitch_rad}"
+            )
 
     def move(self, v: float, r: float | None = None, t: float | None = None):
         """
@@ -168,13 +175,15 @@ class Commander:
         return not self.sim.share.stop_event.is_set()
 
     def wait(self):
-        print(f"[{self.sim.share.state._t:.3f}] start wait")
+        if self.sim.debug_log:
+            print(f"[{self.sim.share.state._t:.3f}] start wait")
         while (
             self.sim.share.state._time_cmd_issued > self.sim.share.state._time_cmd_ended
             and self.alive()
         ):
             time.sleep(0)  # GILを開放し他のスレッドの処理を進める
-        print(f"[{self.sim.share.state._t:.3f}] exit wait")
+        if self.sim.debug_log:
+            print(f"[{self.sim.share.state._t:.3f}] exit wait")
 
 
 class TimeStat:
@@ -202,17 +211,22 @@ class CarSim:
     def __init__(
         self,
         prop: VehicleProp,
+        mission: MissionBase,
         drive_dt=None,
         detect_dt=None,
         throttle: float = 10,
+        *,
+        debug_log=False,
     ):
         """
         Args:
             prop: 車両の定義
+            mission: ミッションの定義
             drive_dt: 車両の位置・姿勢の更新間隔[s]
             detect_dt: 認識結果の更新間隔[s]
             throttle: シミュレーションの実行速度。1.0の場合、シミュレーション時間と実時間は同じ。10の場合、10倍の速さで処理される。
         """
+        self.debug_log = debug_log
         if drive_dt is None:
             drive_dt = prop.calc_recomended_dt(
                 0.01, 5
@@ -235,14 +249,10 @@ class CarSim:
         self.share = ControllerSharedData()
         self._stopped_from: float | None = None
 
-        self.mission = None
-        self.history = History()
-        self.drive_stat = TimeStat()
-        self.detect_stat = TimeStat()
-
+        self._set_mission(mission)
         self.com = Commander(self)
 
-    def set_mission(
+    def _set_mission(
         self,
         mission: MissionBase,
     ):
@@ -262,9 +272,6 @@ class CarSim:
         """
         認識のシミュレーションを行い、state.merkersを更新する。
         """
-        if self.mission is None:
-            raise Exception("mission is not set")
-
         poly = self.prop.get_camera_view_polygon(self.share.state.cam_pitch)
         found: list[DetectedSign] = []
 
@@ -310,9 +317,6 @@ class CarSim:
         - コマンドは１つの微小区間で最大で１つのみ処理される
           - ある微小区間で複数のコマンドが来た場合でキューの最大サイズが1より大きい場合、処理されなかったコマンドは次の微小区間で順次処理される。
         """
-        if self.mission is None:
-            raise Exception("mission is not set")
-
         if (
             self.share.state._t_cancel is not None
             and self.share.state._t_cancel <= self.share.state._t
@@ -322,13 +326,15 @@ class CarSim:
             self.share.state.w = 0
             self.share.state._t_cancel = None
             self.share.state._time_cmd_ended += 1
-            print(f"[{self.share.state._t:.3f}] stopped")
+            if self.debug_log:
+                print(f"[{self.share.state._t:.3f}] stopped")
 
         if not self.share.commands.empty():
             command = self.share.commands.get(block=False)
-            print(
-                f"[{self.share.state._t:.3f}] recv command remained:{self.share.commands.qsize()}"
-            )
+            if self.debug_log:
+                print(
+                    f"[{self.share.state._t:.3f}] recv command remained:{self.share.commands.qsize()}"
+                )
             if isinstance(command, SpeedCommand):
                 if self.share.state._t_cancel is not None:
                     # 有効時間ありのコマンドが実行中に次のコマンドが来たら、有効時間ありのコマンドは終了扱いとする
@@ -344,13 +350,20 @@ class CarSim:
                     self.share.state.w = self._limit_two_sides(
                         command.w, math.radians(self.prop.max_rotate_deg)
                     )
-                    print(
-                        f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
-                    )
+                    if self.debug_log:
+                        print(
+                            f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
+                        )
             elif isinstance(command, CameraCommand):
                 self.share.state.cam_pitch = command.pitch
             else:
                 raise ValueError(f"invalid command type: {type(command)}")
+
+        if self.share.state.v == 0 and self.share.state.w == 0:
+            if self.share.state._t_stop is None:
+                self.share.state._t_stop = self.share.state._t
+        else:
+            self.share.state._t_stop = None
 
         self.share.state.yaw += self.share.state.w * self.drive_dt
         self.share.state.x += (
@@ -360,23 +373,34 @@ class CarSim:
             self.share.state.v * math.sin(self.share.state.yaw) * self.drive_dt
         )
         self.share.state._t += self.drive_dt
+        goal_newly_reached = self._check_goal_completion(
+            (self.share.state._t - self.share.state._t_stop)
+            if self.share.state._t_stop is not None
+            else 0.0
+        )
+        if goal_newly_reached:
+            self._increase_goal_cnt()
 
+    def _increase_goal_cnt(self, update_latest_history=False):
+        self.share.state._goal_cnt += 1
+        if len(self.mission.goals) == self.share.state._goal_cnt:
+            print(f"[{self.share.state._t:.3f}] all goals reached")
+            self.share.stop_event.set()
+        else:
+            print(
+                f"[{self.share.state._t:.3f}] goal {self.share.state._goal_cnt} reached"
+            )
+
+    def _check_goal_completion(self, stopping_duration: float) -> bool:
         num_goals = len(self.mission.goals)
         if num_goals > self.share.state._goal_cnt:
             target_goal = self.mission.goals[self.share.state._goal_cnt]
             if target_goal.ok(
                 (self.share.state.x, self.share.state.y),
-                self.share.state.v,
-                self.share.state.w,
+                stopping_duration,
             ):
-                self.share.state._goal_cnt += 1
-                print(
-                    f"[{self.share.state._t:.3f}] goal {self.share.state._goal_cnt} reached"
-                )
-
-        if num_goals >= 1 and num_goals == self.share.state._goal_cnt:
-            print(f"[{self.share.state._t:.3f}] all goals reached")
-            self.share.stop_event.set()
+                return True
+        return False
 
     def _sim_all(self):
         """
@@ -393,9 +417,6 @@ class CarSim:
 
         - 車の状態はself.drive_dt秒ごとのスナップショットとしてself.historyに記録される
         """
-        if self.mission is None:
-            raise Exception("mission is not set")
-
         self._update_detect_state()
         self.history.record(self.share.state)  # 初期状態
         t_start = time.perf_counter()
@@ -429,7 +450,7 @@ class CarSim:
                 with self.share.lock:
                     t0 = time.thread_time()
                     self._step()
-                    self.history.update_latest(
+                    self.history.update_latest_vw(
                         self.share.state.v, self.share.state.w
                     )  # v,wの変更は遡って反映
                     t1 = time.thread_time()
@@ -443,13 +464,21 @@ class CarSim:
                     self.detect_stat.add(t2 - t1)
                     self.history.record(self.share.state)
 
+        # 停止状態で終了する場合は、停止継続時間を無限大と見做してゴール判定をしなおす
+        if self.share.state.v == 0 and self.share.state.w == 0:
+            goal_newly_reached = self._check_goal_completion(float("inf"))
+            if goal_newly_reached:
+                self._increase_goal_cnt(True)
+                self.history.update_latest_goal_cnt(self.share.state._goal_cnt)
+
         print(f"[{self.share.state._t:.3f}] simulation_func finished")
         print(f"    takes {time.perf_counter() - t_start:.3f}s")
         print(f"    ideal {self.share.state._t / self.throttle:.3f}s")
 
     def _call_command_func(self):
-        if self.mission is None:
-            raise Exception("mission is not set")
+        # simlationが始まるまで待つ
+        while len(self.history.ts) == 0:
+            time.sleep(0)  # GILを開放し他のスレッドの処理を進める
 
         commands = {
             "move": self.com.move,
@@ -470,10 +499,8 @@ class CarSim:
         - commandスレッド: ユーザが定義したcommand_funcを実行する。
 
         """
-        if self.mission is None:
-            raise Exception("mission is not set")
-
         self.share.reset(self.mission.get_initial_state())
+        self.mission.relocate_signs()
 
         command_thread = threading.Thread(target=self._call_command_func)
         sim_thread = threading.Thread(target=self._sim_all)

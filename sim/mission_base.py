@@ -41,8 +41,8 @@ class MissionBase:
         self.initial_cam_pitch_deg = 30  # 30度
         self.initial_xy = (0, 0)
         self.initial_yaw_deg = 0
-        self.random_d_xy = (0.1, 0.1)
-        self.random_d_yaw_deg = 10.0
+        self.random_d_xy = (0.0, 0.0)
+        self.random_d_yaw_deg = 0.0
 
     def set_world(self, world: World):
         self.world = world
@@ -89,18 +89,6 @@ class MissionBase:
         sign_to_symbol: dict[str, tuple[str, str]] | None = None,
     ):
         self.signs = signs
-        self.signs_pos_world = np.array([[m.x, m.y] for m in signs], dtype=np.float32)
-        self.signs_box: Box | None = (
-            Box(
-                np.min(self.signs_pos_world[:, 0]),
-                np.min(self.signs_pos_world[:, 1]),
-                np.max(self.signs_pos_world[:, 0]),
-                np.max(self.signs_pos_world[:, 1]),
-            )
-            if len(signs) > 0
-            else None
-        )
-
         if sign_to_symbol is not None:
             self.sign_to_symbol = sign_to_symbol
         else:
@@ -121,3 +109,21 @@ class MissionBase:
                 name: (default_symbols[i % len(default_symbols)], "orange")
                 for i, name in enumerate(names)
             }
+
+    def relocate_signs(self):
+        for sign in self.signs:
+            sign.relocate()
+            
+        self.signs_pos_world = np.array(
+            [[m.x, m.y] for m in self.signs], dtype=np.float32
+        )
+        self.signs_box: Box | None = (
+            Box(
+                np.min(self.signs_pos_world[:, 0]),
+                np.min(self.signs_pos_world[:, 1]),
+                np.max(self.signs_pos_world[:, 0]),
+                np.max(self.signs_pos_world[:, 1]),
+            )
+            if len(self.signs) > 0
+            else None
+        )

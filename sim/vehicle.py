@@ -32,6 +32,7 @@ class VehicleState:
         default_factory=list
     )  # 車両座標系での路面標識(xが近い順にソート済)
     _t_last_detect: float = 0.0  # detectシミュレーションにおける最終更新時刻
+    _t_stop: float | None = 0.0  # 停止状態になった時刻
 
 
 @dataclass

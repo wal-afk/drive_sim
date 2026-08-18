@@ -7,7 +7,7 @@ class GoalBase:
     def __init__(self, *, should_stop: bool = True):
         self.should_stop = should_stop  # Trueの場合はゴール到達後に停止する必要がある。Falseの場合はゴールを通過すればよい
 
-    def ok(self, xy: tuple[float, float], v: float, w: float) -> bool:
+    def ok(self, xy: tuple[float, float], stopping_duration: float) -> bool:
         raise NotImplementedError("ok must be implemented in subclass")
 
 
@@ -29,9 +29,9 @@ class GoalLine(GoalBase):
         self.norm2 = np.inner(self.xy, self.xy)
         self.outside_is_goal = outside_is_goal
 
-    def ok(self, xy: tuple[float, float], v: float, w: float) -> bool:
+    def ok(self, xy: tuple[float, float], stopping_duration: float) -> bool:
         if self.should_stop:
-            if v != 0 or w != 0:
+            if stopping_duration <= 1:
                 return False
         s = np.inner(np.asarray(xy, dtype=np.float32), self.xy) - self.norm2
         if self.outside_is_goal:
@@ -54,9 +54,9 @@ class GoalCircle(GoalBase):
         self.xy = xy
         self.r = r
 
-    def ok(self, xy: tuple[float, float], v: float, w: float) -> bool:
+    def ok(self, xy: tuple[float, float], stopping_duration: float) -> bool:
         if self.should_stop:
-            if v != 0 or w != 0:
+            if stopping_duration < 1:
                 return False
         p = np.asarray(xy, dtype=np.float32) - np.asarray(self.xy)
         s = np.inner(p, p) - self.r * self.r
