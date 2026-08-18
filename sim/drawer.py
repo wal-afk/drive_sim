@@ -42,21 +42,6 @@ class MissionDrawer:
         """
         start地点を描画する為のscatterを作成する。
         """
-        pos_points = self.mission.get_random_xy_box().get_points(
-            connect_end_to_start=True
-        )
-        pos_scatter = go.Scatter(
-            mode="lines",
-            x=pos_points[:, 0],
-            y=pos_points[:, 1],
-            fill="toself",
-            line={
-                "width": 3,
-                "color": "red",
-                "dash": "solid",
-            },
-            name="スタート地点",
-        )
         angle_points = calc_fan_points(
             self.mission.initial_xy,
             0.3,
@@ -75,7 +60,22 @@ class MissionDrawer:
             },
             name="スタート角度",
         )
-        return [pos_scatter, angle_scatter]
+        pos_points = self.mission.get_random_xy_box().get_points(
+            connect_end_to_start=True, min_thickness=0.01
+        )
+        pos_scatter = go.Scatter(
+            mode="lines",
+            x=pos_points[:, 0],
+            y=pos_points[:, 1],
+            fill="toself",
+            line={
+                "width": 3,
+                "color": "red",
+                "dash": "solid",
+            },
+            name="スタート地点",
+        )
+        return [angle_scatter, pos_scatter]
 
     def _create_world_scatters(self) -> list[go.Scatter]:
         """

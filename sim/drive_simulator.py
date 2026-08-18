@@ -4,6 +4,7 @@ import threading
 from dataclasses import dataclass
 import math
 from queue import Queue
+import traceback
 
 import numpy as np
 
@@ -247,12 +248,11 @@ class CarSim:
         self.detect_dt = detect_dt
         self.throttle = throttle
         self.share = ControllerSharedData()
-        self._stopped_from: float | None = None
 
-        self._set_mission(mission)
+        self._reset(mission)
         self.com = Commander(self)
 
-    def _set_mission(
+    def _reset(
         self,
         mission: MissionBase,
     ):
@@ -260,6 +260,9 @@ class CarSim:
         self.history = History()
         self.drive_stat = TimeStat()
         self.detect_stat = TimeStat()
+
+        self._stopped_from: float | None = None
+        self._command_fail = False
 
     @staticmethod
     def contains(polygon: np.ndarray, x: float, y: float) -> bool:
@@ -464,18 +467,21 @@ class CarSim:
                     self.detect_stat.add(t2 - t1)
                     self.history.record(self.share.state)
 
-        # 停止状態で終了する場合は、停止継続時間を無限大と見做してゴール判定をしなおす
-        if self.share.state.v == 0 and self.share.state.w == 0:
-            goal_newly_reached = self._check_goal_completion(float("inf"))
-            if goal_newly_reached:
-                self._increase_goal_cnt(True)
-                self.history.update_latest_goal_cnt(self.share.state._goal_cnt)
+        if self._command_fail:
+            return
+        else:
+            # 停止状態で終了する場合は、停止継続時間を無限大と見做してゴール判定をしなおす
+            if self.share.state.v == 0 and self.share.state.w == 0:
+                goal_newly_reached = self._check_goal_completion(float("inf"))
+                if goal_newly_reached:
+                    self._increase_goal_cnt(True)
+                    self.history.update_latest_goal_cnt(self.share.state._goal_cnt)
 
-        print(f"[{self.share.state._t:.3f}] simulation_func finished")
-        print(f"    takes {time.perf_counter() - t_start:.3f}s")
-        print(f"    ideal {self.share.state._t / self.throttle:.3f}s")
+            print(f"[{self.share.state._t:.3f}] simulation_func finished")
+            print(f"    takes {time.perf_counter() - t_start:.3f}s")
+            print(f"    ideal {self.share.state._t / self.throttle:.3f}s")
 
-    def _call_command_func(self):
+    def _call_command_func(self) -> bool:
         # simlationが始まるまで待つ
         while len(self.history.ts) == 0:
             time.sleep(0)  # GILを開放し他のスレッドの処理を進める
@@ -488,11 +494,19 @@ class CarSim:
             "search_all": self.com.search_all,
             "wait": self.com.wait,
         }
+        try:
+            self.mission.command_func(**commands)
+            print(f"[{self.share.state._t:.3f}] command_func finished")
+            return True
+        except Exception as e:
+            self._command_fail = True
+            print("プログラム（command_func）にエラーが発生しました")
+            print("------ エラー：", e)
+            print("")
+            traceback.print_exc()
+        return False
 
-        self.mission.command_func(**commands)
-        print(f"[{self.share.state._t:.3f}] command_func finished")
-
-    def run(self):
+    def run(self) -> bool:
         """
         シミュレーションの実行を開始し、２つのスレッドを起動する。
         - simスレッド: 車両の位置・姿勢の更新、detection結果の更新を行う。
@@ -515,4 +529,8 @@ class CarSim:
                 )  # シミュレーション時間内で1秒以内に終了に気づく
         finally:
             self.share.stop_event.set()
-            print(f"Trajectory points : {len(self.history.ts)}")
+            if self._command_fail:
+                return False
+            else:
+                print(f"Trajectory points : {len(self.history.ts)}")
+                return True

@@ -117,17 +117,38 @@ class Box:
     def get_y_range(self) -> tuple[float, float]:
         return self.min_y, self.max_y
 
-    def get_points(self, *, connect_end_to_start: False) -> np.ndarray:
+    def get_points(
+        self, *, connect_end_to_start: False, min_thickness=0.0
+    ) -> np.ndarray:
         """
         矩形の4点の座標を求める
+        Args:
+            connect_end_to_start: Trueの場合、最後の点と最初の点を結ぶ線分も描画する
+            min_thickness: 矩形の厚みがmin_thickness以下の場合、矩形をmin_thicknessの厚みに拡張する
         Returns:
             shape=(4,2)の矩形の4点の座標を返す
         """
+        if self.max_x - self.min_x < min_thickness:
+            center_x = (self.max_x + self.min_x) / 2
+            min_x = center_x - min_thickness / 2
+            max_x = center_x + min_thickness / 2
+        else:
+            min_x = self.min_x
+            max_x = self.max_x
+
+        if self.max_y - self.min_y < min_thickness:
+            center_y = (self.max_y + self.min_y) / 2
+            min_y = center_y - min_thickness / 2
+            max_y = center_y + min_thickness / 2
+        else:
+            min_y = self.min_y
+            max_y = self.max_y
+
         corners = [
-            [self.min_x, self.min_y],
-            [self.max_x, self.min_y],
-            [self.max_x, self.max_y],
-            [self.min_x, self.max_y],
+            [min_x, min_y],
+            [max_x, min_y],
+            [max_x, max_y],
+            [min_x, max_y],
         ]
         if connect_end_to_start:
             return np.array(
