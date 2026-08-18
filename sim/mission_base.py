@@ -21,7 +21,7 @@ class MissionBase:
     ):
         """
         Args:
-            t_max: シミュレーションの最大時間[s]。Noneの場合は無制限
+            t_max: シミュレーションの最大時間[秒]。Noneの場合は無制限
             randomize_initial_state: 初期状態をランダム化するかどうか
         """
 

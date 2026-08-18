@@ -382,7 +382,7 @@ class SimDrawer:
             }
         else:
             return {
-                "text": "v={:.2f} m/s, w={:.2f} 度/s, goal {}/{} ".format(
+                "text": "v={:.2f} m/秒, w={:.2f} 度/秒, goal {}/{} ".format(
                     his.vs[idx],
                     math.degrees(his.ws[idx]),
                     his.goal_cnt[idx],

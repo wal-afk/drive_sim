@@ -127,9 +127,9 @@ class Commander:
     def move(self, v: float, r: float | None = None, t: float | None = None):
         """
         Args:
-            v: 前進速度[m/s]。正の値は前進、負の値は後退
+            v: 前進速度[m/秒]。正の値は前進、負の値は後退
             r: 回転半径[m]。Noneの場合は直進する。正の値は左カーブ、負の値は右カーブ
-            t: 継続秒数[s]
+            t: 継続秒数[秒]
         """
         if r is None:
             self._send_speed_cmd(v, 0, t)
@@ -139,8 +139,8 @@ class Commander:
     def rotate(self, w: float, t: float | None = None):
         """
         Args:
-            w: 回転速度[度/s]。正の値は反時計回り
-            t: 継続秒数[s]
+            w: 回転速度[度/秒]。正の値は反時計回り
+            t: 継続秒数[秒]
         """
         self._send_speed_cmd(0, math.radians(w), t)
 
@@ -223,8 +223,8 @@ class CarSim:
         Args:
             prop: 車両の定義
             mission: ミッションの定義
-            drive_dt: 車両の位置・姿勢の更新間隔[s]
-            detect_dt: 認識結果の更新間隔[s]
+            drive_dt: 車両の位置・姿勢の更新間隔[秒]
+            detect_dt: 認識結果の更新間隔[秒]
             throttle: シミュレーションの実行速度。1.0の場合、シミュレーション時間と実時間は同じ。10の場合、10倍の速さで処理される。
         """
         self.debug_log = debug_log
