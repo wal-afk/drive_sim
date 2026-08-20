@@ -11,13 +11,19 @@ import numpy as np
 from .sign import DetectedSign
 from .vehicle import VehicleState, VehicleProp
 from .mission_base import MissionBase
-from .calc import Box, world_coord_to_vehicle_coord
+from .calc import Box, world_coord_to_vehicle_coord, vehicle_coord_to_world_coord
 
 
 @dataclass
 class SpeedCommand:
+    """
+    車両の速度指令を表す
+    auto_w_edge_nameにNone以外を指定した場合、wの指定は無視され、自動的に適切なwが選ばれる
+    """
+
     v: float = 0.0
     w: float = 0.0
+    auto_w_edge_name: str | None = None
 
     # コマンドの有効時間。有効時間経過後にはv=0,w=0に戻る。0を指定しても1フレーム分はコマンドが有効になる。
     # Noneを指定した場合、永遠にコマンドは有効になる。
@@ -38,6 +44,7 @@ class History:
         self.cam_pitchs: list[float] = []
         self.vs: list[float] = []
         self.ws: list[float] = []
+        self.predict_ws: list[np.ndarray | None] = []
         self.detections: list[list[DetectedSign]] = []
         self.goal_cnt: list[int] = []
 
@@ -49,6 +56,7 @@ class History:
         self.cam_pitchs.append(state.cam_pitch)
         self.vs.append(state.v)
         self.ws.append(state.w)
+        self.predict_ws.append(state.predict_w)
         self.detections.append(state._detection)
         self.goal_cnt.append(state._goal_cnt)
 
@@ -68,6 +76,7 @@ class History:
         new_history.cam_pitchs = self.cam_pitchs[::n]
         new_history.vs = self.vs[::n]
         new_history.ws = self.ws[::n]
+        new_history.predict_ws = self.predict_ws[::n]
         new_history.detections = self.detections[::n]
         new_history.goal_cnt = self.goal_cnt[::n]
         if len(self.ts) % n != 1:  # 最後のフレームを加える
@@ -78,6 +87,7 @@ class History:
             new_history.cam_pitchs.append(self.cam_pitchs[-1])
             new_history.vs.append(self.vs[-1])
             new_history.ws.append(self.ws[-1])
+            new_history.predict_ws.append(self.predict_ws[-1])
             new_history.detections.append(self.detections[-1])
             new_history.goal_cnt.append(self.goal_cnt[-1])
         return new_history
@@ -97,8 +107,8 @@ class ControllerSharedData:
     def __init__(self):
         self.reset(VehicleState())
 
-    def reset(self, state: VehicleState):
-        self.state = state
+    def reset(self, initial_state: VehicleState):
+        self.state = initial_state
         self.commands: Queue = Queue(maxsize=1)  # 暫定：コマンドは最大1件まで保持
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -108,7 +118,16 @@ class Commander:
     def __init__(self, sim: CarSim):
         self.sim = sim
 
-    def _send_speed_cmd(self, v: float, w_rad: float, t: float | None = None):
+    def _send_auto_speed_cmd(self, v: float, edge_name: str, t: float | None = None):
+        self.sim.share.commands.put(SpeedCommand(v=v, auto_w_edge_name=edge_name, t=t))
+        if t is not None:
+            self.sim.share.state._time_cmd_issued += 1
+        if self.sim.debug_log:
+            print(
+                f"[{self.sim.share.state._t:.3f}] put speed command v={v}, w=auto to keep {edge_name}, t={t}"
+            )
+
+    def _send_manual_speed_cmd(self, v: float, w_rad: float, t: float | None = None):
         self.sim.share.commands.put(SpeedCommand(v=v, w=w_rad, t=t))
         if t is not None:
             self.sim.share.state._time_cmd_issued += 1
@@ -132,9 +151,21 @@ class Commander:
             t: 継続秒数[秒]
         """
         if r is None:
-            self._send_speed_cmd(v, 0, t)
+            self._send_manual_speed_cmd(v, 0, t)
         else:
-            self._send_speed_cmd(v, v / r, t)
+            self._send_manual_speed_cmd(v, v / r, t)
+
+    def auto(self, v: float, edge_name: str | None = None, t: float | None = None):
+        """
+        Args:
+            v: 前進速度[m/秒]。正の値は前進、負の値は後退
+            edge_name: 角速度を自動的に決定する為の目標のedgeの名前。Noneの場合はworldに設定されている最初のedgeを目標とする
+            t: 継続秒数[秒]
+        """
+        if edge_name is None:
+            edges = list(self.sim.mission.world.edges.values())
+            edge_name = edges[0].name
+        self._send_auto_speed_cmd(v, edge_name, t)
 
     def rotate(self, w: float, t: float | None = None):
         """
@@ -142,7 +173,7 @@ class Commander:
             w: 回転速度[度/秒]。正の値は反時計回り
             t: 継続秒数[秒]
         """
-        self._send_speed_cmd(0, math.radians(w), t)
+        self._send_manual_speed_cmd(0, math.radians(w), t)
 
     def camera(self, pitch: float):
         """
@@ -213,8 +244,9 @@ class CarSim:
         self,
         prop: VehicleProp,
         mission: MissionBase,
-        drive_dt=None,
-        detect_dt=None,
+        drive_dt: float | None = None,
+        detect_dt: float | None = None,
+        auto_dt: float = 1.0,
         throttle: float = 10,
         *,
         debug_log=False,
@@ -225,6 +257,7 @@ class CarSim:
             mission: ミッションの定義
             drive_dt: 車両の位置・姿勢の更新間隔[秒]
             detect_dt: 認識結果の更新間隔[秒]
+            auto_dt: 自動的に適切なwを計算する際の区間間隔[秒]
             throttle: シミュレーションの実行速度。1.0の場合、シミュレーション時間と実時間は同じ。10の場合、10倍の速さで処理される。
         """
         self.debug_log = debug_log
@@ -236,6 +269,7 @@ class CarSim:
             detect_dt = prop.calc_recomended_dt(
                 0.1, 10
             )  # 認識間隔を自動調整。最大速度で0.1m進むもしくは最大回転速度で10度回転する時間幅とする
+
         print(
             f"drive_dt={drive_dt:.3f}, detect_dt={detect_dt:.3f}, throttle={throttle}"
         )
@@ -246,6 +280,7 @@ class CarSim:
 
         self.drive_dt = drive_dt
         self.detect_dt = detect_dt
+        self.auto_dt = max(auto_dt, drive_dt)  # auto_dtはdrive_dtより短くできない
         self.throttle = throttle
         self.share = ControllerSharedData()
 
@@ -304,6 +339,114 @@ class CarSim:
     def _limit_two_sides(value: float, limit: float) -> float:
         return max(-limit, min(value, limit))
 
+    def _calc_auto_w(self, *, num_waypoints=5) -> np.ndarray:
+        """
+        self.share.state.auto_w_edge_nameに従って、適切なwを計算する
+        Args:
+            num_waypoints: 経由点を何点設定するか
+        Returns:
+            予測経路の各区間での角速度 shape=(NUM_WAYPOINTS,)
+        """
+        assert self.share.state.auto_w_edge_name is not None
+
+        target_edge = self.mission.world.edges.get(self.share.state.auto_w_edge_name)
+
+        if target_edge is None:
+            raise ValueError(
+                f"edge {self.share.state.auto_w_edge_name} not found in world"
+            )
+
+        # 角加速度（角速度の変化量）の候補値[deg/s^2]
+        candidate_a_deg = [-50, -10, 0, 10, 50]
+
+        num_candidates = len(candidate_a_deg)
+
+        indices = (
+            np.indices([num_candidates] * num_waypoints).reshape(num_waypoints, -1).T
+        )  # shape=(N_patterns, NUM_WAYPOINTS)
+
+        # 各区間開始時の角速度の変化
+        dw_patterns = (
+            self.auto_dt * np.deg2rad(np.array(candidate_a_deg))[indices]
+        )  # shape=(N_patterns, NUM_WAYPOINTS)
+
+        # 各区間での角速度
+        w_patterns = self.share.state.w + np.cumsum(
+            dw_patterns, axis=1
+        )  # shape=(N_patterns, NUM_WAYPOINTS)
+        max_rotate_rad = math.radians(self.prop.max_rotate_deg) / 4
+        w_patterns = np.clip(w_patterns, -max_rotate_rad, max_rotate_rad)
+        xy_patterns_local = self._predict_xy_from_w(
+            w_patterns, self.share.state.v
+        )  # local座標系での軌跡
+        xy_patterns_wprld = vehicle_coord_to_world_coord(
+            xy_patterns_local,
+            self.share.state.x,
+            self.share.state.y,
+            self.share.state.yaw,
+        )
+
+        score_patterns = target_edge.calc_rms_distance(
+            xy_patterns_wprld
+        )  # shape=(N_patterns)
+        best_idx = np.argmin(score_patterns)
+
+        return w_patterns[best_idx]
+
+    def _predict_xy_from_w(self, w_patterns: np.ndarray, v: float) -> np.ndarray:
+        """
+        各パターンの角速度から予測経路の各区間での位置を計算する
+        Args:
+            w_patterns: 各区間での角速度 shape=(N_patterns, NUM_WAYPOINTS)
+            v :速度[m/秒]
+        Returns:
+            予測経路の各区間での位置 shape=(N_patterns, NUM_WAYPOINTS, 2)
+            車の初期位置からの相対座標で表される
+        """
+        ds = v * self.auto_dt
+
+        # 各区間終了時（=経由点）の姿勢角
+        yaw_end_patterns = np.cumsum(
+            w_patterns * self.auto_dt,
+            axis=1,
+        )  # shape=(N_patterns, NUM_WAYPOINTS)
+
+        # 各区間開始時の姿勢角
+        yaw_start_patterns = np.concatenate(
+            [
+                np.full(
+                    (yaw_end_patterns.shape[0], 1),
+                    0,
+                ),
+                yaw_end_patterns[:, :-1],
+            ],
+            axis=1,
+        )  # shape=(N_patterns, NUM_WAYPOINTS)
+
+        # 各区間での曲率
+        k_patterns = w_patterns / v  # shape=(N_patterns, NUM_WAYPOINTS)
+
+        # 各区間での移動量
+        dx_patterns = np.where(
+            np.abs(k_patterns) > 1e-10,
+            (np.sin(yaw_end_patterns) - np.sin(yaw_start_patterns)) / k_patterns,
+            ds * np.cos(yaw_start_patterns),
+        )
+
+        dy_patterns = np.where(
+            np.abs(k_patterns) > 1e-10,
+            (np.cos(yaw_start_patterns) - np.cos(yaw_end_patterns)) / k_patterns,
+            ds * np.sin(yaw_start_patterns),
+        )
+
+        # 初期位置からの位置
+        x_patterns = np.cumsum(dx_patterns, axis=1)  # shape=(N_patterns, NUM_WAYPOINTS)
+        y_patterns = np.cumsum(dy_patterns, axis=1)  # shape=(N_patterns, NUM_WAYPOINTS)
+        xy_patterns = np.stack(
+            [x_patterns, y_patterns], axis=2
+        )  # shape=(N_patterns, NUM_WAYPOINTS, 2)
+        return xy_patterns
+
     def _step(self):
         """
         車の位置・姿勢の更新を1step(=1微小区間分)だけ行いstateの時刻をself.drive_dtだけ進める。
@@ -327,11 +470,13 @@ class CarSim:
             # コマンドの有効時間が終了したので停止する
             self.share.state.v = 0
             self.share.state.w = 0
+            self.share.state.auto_w_edge_name = None
             self.share.state._t_cancel = None
             self.share.state._time_cmd_ended += 1
             if self.debug_log:
                 print(f"[{self.share.state._t:.3f}] stopped")
 
+        # commandの処理
         if not self.share.commands.empty():
             command = self.share.commands.get(block=False)
             if self.debug_log:
@@ -342,25 +487,51 @@ class CarSim:
                 if self.share.state._t_cancel is not None:
                     # 有効時間ありのコマンドが実行中に次のコマンドが来たら、有効時間ありのコマンドは終了扱いとする
                     self.share.state._time_cmd_ended += 1
+
+                # コマンドキャンセル時刻の予約
                 self.share.state._t_cancel = (
                     self.share.state._t + command.t if command.t is not None else None
                 )
-                if self.share.state.v != command.v or self.share.state.w != command.w:
-                    # 加速度無限大で即座に反映
-                    self.share.state.v = self._limit_two_sides(
-                        command.v, self.prop.max_velocity
-                    )
-                    self.share.state.w = self._limit_two_sides(
-                        command.w, math.radians(self.prop.max_rotate_deg)
-                    )
-                    if self.debug_log:
-                        print(
-                            f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
+                if command.auto_w_edge_name is not None:
+                    self.share.state.auto_w_edge_name = command.auto_w_edge_name
+                    if self.share.state.v != command.v:
+                        # 加速度無限大で即座に反映
+                        self.share.state.v = self._limit_two_sides(
+                            command.v, self.prop.max_velocity
                         )
+                        if self.debug_log:
+                            print(
+                                f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w=auto to keep {command.auto_w_edge_name}"
+                            )
+                else:
+                    self.share.state.auto_w_edge_name = None
+                    if (
+                        self.share.state.v != command.v
+                        or self.share.state.w != command.w
+                    ):
+                        # 加速度無限大で即座に反映
+                        self.share.state.v = self._limit_two_sides(
+                            command.v, self.prop.max_velocity
+                        )
+                        self.share.state.w = self._limit_two_sides(
+                            command.w, math.radians(self.prop.max_rotate_deg)
+                        )
+                        if self.debug_log:
+                            print(
+                                f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
+                            )
             elif isinstance(command, CameraCommand):
                 self.share.state.cam_pitch = command.pitch
             else:
                 raise ValueError(f"invalid command type: {type(command)}")
+
+        # auto_wの処理（自動的に適切なwを決定）
+        if self.share.state.auto_w_edge_name is not None and self.share.state.v != 0:
+            best_w = self._calc_auto_w()
+            self.share.state.w = best_w[0]
+            self.share.state.predict_w = best_w
+        else:
+            self.share.state.predict_w = None
 
         if self.share.state.v == 0 and self.share.state.w == 0:
             if self.share.state._t_stop is None:
@@ -488,6 +659,7 @@ class CarSim:
 
         commands = {
             "move": self.com.move,
+            "auto": self.com.auto,
             "rotate": self.com.rotate,
             "camera": self.com.camera,
             "search": self.com.search,

@@ -76,12 +76,12 @@ def vehicle_coord_to_world_coord(
     """
     車両座標系の点群をワールド座標系に変換する。
     Args:
-        pts: 車両座標系の点群 shape=(N, 2)
+        pts: 車両座標系の点群 shape=(:, 2)
         x: 車両のx座標
         y: 車両のy座標
         yaw: 車両のヨー角（ラジアン）反時計回りが正
     Returns:
-        ワールド座標系の点群 shape=(N, 2)
+        ワールド座標系の点群 shape=(:, 2)
     """
     R = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
     return pts @ R.T + np.array([x, y])

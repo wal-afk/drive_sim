@@ -80,10 +80,9 @@ class MissionDrawer:
     def _create_world_scatters(self) -> list[go.Scatter]:
         """
         worldを描画する為のscatterを作成する。
-        同じnameのsignを1グループにして1つのscatterにまとめる。
         """
         world_scatters = []
-        for world_edge in self.mission.world.edges:
+        for world_edge in self.mission.world.edges.values():
             pts = world_edge.get_points()
             world_scatters.append(
                 go.Scatter(
@@ -115,7 +114,7 @@ class MissionDrawer:
             symbol, color = self.mission.sign_to_symbol.get(name, unknown_symbol)
 
             common_args = {
-                "legendrank": 5,
+                "legendrank": 6,
                 "x": [m.x for m in target_signs],
                 "y": [m.y for m in target_signs],
                 "name": name,
@@ -155,7 +154,7 @@ class MissionDrawer:
         """
 
         first = go.Scatter(
-            legendrank=6,
+            legendrank=7,
             x=[d.sign.x for d in detections[0:1] if d.sign is not None],
             y=[d.sign.y for d in detections[0:1] if d.sign is not None],
             mode="markers",
@@ -168,7 +167,7 @@ class MissionDrawer:
             },
         )
         others = go.Scatter(
-            legendrank=7,
+            legendrank=8,
             x=[d.sign.x for d in detections[1:] if d.sign is not None],
             y=[d.sign.y for d in detections[1:] if d.sign is not None],
             mode="markers",
@@ -193,7 +192,7 @@ class MissionDrawer:
             dash = "solid" if goal.should_stop else "dot"
 
             common_args = {
-                "legendrank": 4,
+                "legendrank": 5,
                 "mode": "lines",
                 "line": {"width": 2, "color": color, "dash": dash},
                 "name": f"goal{i+1}",
@@ -266,7 +265,7 @@ class SimDrawer:
         車の軌跡を描画する為のscatterを作成する。
         """
         return go.Scatter(
-            legendrank=1,
+            legendrank=2,
             x=his.xs[: idx + 1],
             y=his.ys[: idx + 1],
             mode="lines",
@@ -283,7 +282,7 @@ class SimDrawer:
             poly, his.xs[idx], his.ys[idx], his.yaws[idx]
         )
         return go.Scatter(
-            legendrank=2,
+            legendrank=3,
             x=poly_world[:, 0],
             y=poly_world[:, 1],
             fill="toself",
@@ -301,7 +300,7 @@ class SimDrawer:
             poly, his.xs[idx], his.ys[idx], his.yaws[idx]
         )
         return go.Scatter(
-            legendrank=3,
+            legendrank=4,
             x=poly_world[:, 0],
             y=poly_world[:, 1],
             fill="toself",
@@ -309,6 +308,38 @@ class SimDrawer:
             line={"width": 2, "color": "gray"},
             name="カメラの視界",
         )
+
+    def _create_predict_scatter(self, his: History, idx: int) -> go.Scatter:
+        """
+        車体の予測軌跡のscatterを作成する。
+        """
+        w_patterns = his.predict_ws[idx]
+        if w_patterns is None:
+            return go.Scatter(
+                legendrank=1,
+                x=[],
+                y=[],
+                mode="lines",
+                name="予測軌跡",
+            )
+        else:
+            v = his.vs[idx]
+            predict_xy_local = self.sim._predict_xy_from_w(w_patterns[None, :], v)[0]
+            predict_xy = vehicle_coord_to_world_coord(
+                predict_xy_local,
+                his.xs[idx],
+                his.ys[idx],
+                his.yaws[idx],
+            )
+
+            return go.Scatter(
+                legendrank=1,
+                x=predict_xy[:, 0],
+                y=predict_xy[:, 1],
+                mode="lines",
+                line={"width": 2, "color": "brown", "dash": "dot"},
+                name="予測軌跡",
+            )
 
     def _create_vehicle_annotation(self, his: History, idx: int) -> dict:
         """
@@ -352,9 +383,6 @@ class SimDrawer:
         """
         グラフの固定位置にhistoryの情報からv,w,goal個数を表示する為のannotationを作成する。
         """
-        if self.sim.mission is None:
-            raise Exception("mission is not set")
-
         common_args = {
             "x": x,
             "y": y,
@@ -404,6 +432,7 @@ class SimDrawer:
         for i in tqdm(range(len(his.xs))):
             data = [
                 self._create_trajectory_scatter(his, i),
+                self._create_predict_scatter(his, i),
                 self._create_vehicle_scatter(his, i),
                 self._create_camera_view_scatter(his, i),
                 *self.mission_drawer.create_goal_scatters(his.goal_cnt[i]),
@@ -432,9 +461,6 @@ class SimDrawer:
         return frames
 
     def _calc_axis_range(self, his: History) -> Box:
-        if self.sim.mission is None:
-            raise Exception("mission is not set")
-
         base_margin = max(self.sim.prop.car_length / 2, self.sim.prop.car_width / 2)
 
         traj_box = his.get_bounding_box()
@@ -475,6 +501,7 @@ class SimDrawer:
             data=[
                 *self.mission_drawer.world_scatters,
                 self._create_trajectory_scatter(his, 0),
+                self._create_predict_scatter(his, 0),
                 self._create_vehicle_scatter(his, 0),
                 self._create_camera_view_scatter(his, 0),
                 *self.mission_drawer.create_goal_scatters(),

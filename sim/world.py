@@ -271,17 +271,118 @@ class WorldEdge:
                 points_list.append(points)
         return np.concatenate(points_list, axis=0)
 
+    def calc_rms_distance(self, points: np.ndarray) -> np.ndarray:
+        """
+        指定点からWorldEdgeまでの距離を求める。
+        Args:
+            points: xy座標の配列。M個の点群を1セットとして、Nセットの情報を一度に扱う。shape=(N,M,2)
+        Returns:
+            各セットの点群のWorldEdgeまでの距離の二乗平均の平方根を返す。 shape=(N)
+        """
+        n = points.shape[0]
+        m = points.shape[1]
+
+        dist_lines = self._calc_distance_to_lines(points.reshape(-1, 2))  # shape=(N*M)
+        dist_arcs = self._calc_distance_to_arcs(points.reshape(-1, 2))  # shape=(N*M)
+        if dist_lines is None:
+            dist = dist_arcs
+        elif dist_arcs is None:
+            dist = dist_lines
+        else:
+            dist = np.minimum(dist_lines, dist_arcs)
+
+        d = dist.reshape(n, m)  # shape=(N,M)
+        rms = np.sqrt(np.mean(d**2, axis=1))
+        return rms
+
+    def _calc_distance_to_lines(self, points: np.ndarray) -> np.ndarray | None:
+        """
+        指定点から全線分までの距離を求める（各線分への距離の内で最小の距離を全線分への距離とする）
+        Args:
+            points: xy座標の配列。shape=(N,2)
+        Returns:
+            全線分までの距離 shape=(N)
+        """
+        if len(self.line_start) == 0:
+            return None
+
+        line_start = np.asarray(self.line_start)  # shape=(K,2)
+        line_end = np.asarray(self.line_end)  # shape=(K,2)
+        line_vec = line_end - line_start  # shape=(K,2)
+        pos_vec = (
+            points[:, np.newaxis, :] - line_start[np.newaxis, :, :]
+        )  # shape=(N,K,2)
+
+        t = np.dot(pos_vec, line_vec) / np.dot(line_vec, line_vec)  # shape=(N,K)
+        t = np.clip(t, 0.0, 1.0)  # 線分なので 0～1 に制限
+
+        # 線分上で最も近い点
+        closest = line_start + t * line_vec  # shape=(N,K,2)
+        dist = np.linalg.norm(points[:, np.newaxis, :] - closest, axis=2)  # shape=(N,K)
+        min_dist = dist.min(axis=1)  # shape=(N)
+
+        return min_dist
+
+    def _calc_distance_to_arcs(self, points: np.ndarray) -> np.ndarray | None:
+        """
+        指定点から全弧までの距離を求める（各弧への距離の内で最小の距離を全弧への距離とする）
+        Args:
+            points: xy座標の配列。shape=(N,2)
+        Returns:
+            全弧までの距離 shape=(N)
+        """
+        if len(self.arc_center) == 0:
+            return None
+
+        center = np.asarray(self.arc_center, dtype=float)  # shape=(K,2)
+        radius = np.asarray(self.arc_radius, dtype=float)  # shape=(K)
+        start_rad = np.radians(
+            np.asarray(self.arc_smaller_deg, dtype=float)
+        )  # shape=(K)
+        end_rad = np.radians(np.asarray(self.arc_bigger_deg, dtype=float))  # shape=(K)
+
+        v = points[:, None, :] - center[None, :, :]  # shape=(N,K,2)
+
+        angle_rad = np.arctan2(v[..., 1], v[..., 0])  # shape=(N,K)
+
+        # 点の方向が円弧の範囲内か
+        half_arc_rad = (end_rad - start_rad) / 2  # shape=(K)
+        mid_rad = (start_rad + end_rad) / 2  # shape=(K)
+        relative_rad = (angle_rad - mid_rad[None, :] + np.pi) % (
+            2 * np.pi
+        ) - np.pi  # - np.pi<=relative_rad<=np.pi. shape=(N,K)
+
+        closest_rad = mid_rad[None, :] + np.clip(
+            relative_rad, -half_arc_rad, half_arc_rad
+        )  # 円弧なので start_rad～end_radの範囲に制限. shape=(N,K)
+
+        closest_point = center[None, :] + radius[None, :, None] * np.stack(
+            [
+                np.cos(closest_rad),
+                np.sin(closest_rad),
+            ],
+            axis=2,
+        )  # shape=(N,K,2)
+
+        dist = np.linalg.norm(
+            points[:, None, :] - closest_point,
+            axis=2,
+        )  # shape=(N,K)
+        min_dist = np.min(dist, axis=1)  # shape=(N)
+        return min_dist
+
 
 class World:
     def __init__(self):
-        self.edges: list[WorldEdge] = []
+        self.edges: dict[str, WorldEdge] = {}
 
     def add_edge(self, edge: WorldEdge):
-        self.edges.append(edge)
+        self.edges[edge.name] = edge
 
     def add_edges(self, edges: list[WorldEdge]):
-        self.edges.extend(edges)
+        for edge in edges:
+            self.add_edge(edge)
 
     def get_bounding_box(self) -> Box | None:
-        boxes = [edge.get_bounding_box() for edge in self.edges]
+        boxes = [edge.get_bounding_box() for edge in self.edges.values()]
         return Box.merge(boxes)

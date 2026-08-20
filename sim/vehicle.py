@@ -25,6 +25,9 @@ class VehicleState:
     cam_pitch: float = 0.0  # カメラのピッチ角（ラジアン）
     v: float = 0.0  # 車両の前進速度(m/s)
     w: float = 0.0  # 車両の回転速度(rad/s)
+    auto_w_edge_name: str | None = None
+    predict_w: np.ndarray | None = None  # 予測経路の各区間での角速度
+
     _goal_cnt: int = 0  # ゴール到達数
 
     # detectシミュレーションからのみ更新（更新も読取もlockは不要）
