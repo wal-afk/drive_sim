@@ -35,6 +35,7 @@ class VehicleState:
         default_factory=list
     )  # 車両座標系での路面標識(xが近い順にソート済)
     _t_last_detect: float = 0.0  # detectシミュレーションにおける最終更新時刻
+    _t_last_auto_w: float = 0.0  # autoシミュレーションにおける最終更新時刻
     _t_stop: float | None = 0.0  # 停止状態になった時刻
 
 
@@ -118,13 +119,20 @@ class VehicleProp:
 
         return pts
 
-    def calc_recomended_dt(self, max_overshoot=0.1, max_overshoot_deg=5) -> float:
+    def calc_recomended_dt(
+        self, max_overshoot: float | None = 0.1, max_overshoot_deg: float | None = 5
+    ) -> float:
         """
         シミュレーションにおける推奨更新間隔を求める。
         例えばmax_overshoot=0.1,max_overshoot_deg=5とした場合は、
         最悪ケースでも更新までに0.1mを超えて進むことなく、かつ5度を超えて回転しまうことはない範囲での、最大の時間を返す。
         """
-        return min(
-            max_overshoot / self.max_velocity,
-            max_overshoot_deg / self.max_rotate_deg,
-        )
+        if max_overshoot is not None and max_overshoot_deg is not None:
+            return min(
+                max_overshoot / self.max_velocity,
+                max_overshoot_deg / self.max_rotate_deg,
+            )
+        elif max_overshoot is not None:
+            return max_overshoot / self.max_velocity
+        elif max_overshoot_deg is not None:
+            return max_overshoot_deg / self.max_rotate_deg

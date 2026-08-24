@@ -246,8 +246,8 @@ class CarSim:
         mission: MissionBase,
         drive_dt: float | None = None,
         detect_dt: float | None = None,
-        auto_dt: float = 1.0,
-        throttle: float = 10,
+        auto_estimate_dt: float = 1.0,
+        throttle: float = 20,
         *,
         debug_log=False,
     ):
@@ -257,7 +257,7 @@ class CarSim:
             mission: ミッションの定義
             drive_dt: 車両の位置・姿勢の更新間隔[秒]
             detect_dt: 認識結果の更新間隔[秒]
-            auto_dt: 自動的に適切なwを計算する際の区間間隔[秒]
+            auto_estimate_dt: 自動的に適切なwを計算する際の予測区間間隔[秒]
             throttle: シミュレーションの実行速度。1.0の場合、シミュレーション時間と実時間は同じ。10の場合、10倍の速さで処理される。
         """
         self.debug_log = debug_log
@@ -280,7 +280,10 @@ class CarSim:
 
         self.drive_dt = drive_dt
         self.detect_dt = detect_dt
-        self.auto_dt = max(auto_dt, drive_dt)  # auto_dtはdrive_dtより短くできない
+        self.auto_estimate_dt = max(
+            auto_estimate_dt, drive_dt
+        )  # auto_dtはdrive_dtより短くできない
+        self.auto_control_dt: float | None = None
         self.throttle = throttle
         self.share = ControllerSharedData()
 
@@ -295,6 +298,8 @@ class CarSim:
         self.history = History()
         self.drive_stat = TimeStat()
         self.detect_stat = TimeStat()
+        self.auto_stat = TimeStat()
+        self.best_w: np.ndarray | None = None
 
         self._stopped_from: float | None = None
         self._command_fail = False
@@ -367,7 +372,7 @@ class CarSim:
 
         # 各区間開始時の角速度の変化
         dw_patterns = (
-            self.auto_dt * np.deg2rad(np.array(candidate_a_deg))[indices]
+            self.auto_estimate_dt * np.deg2rad(np.array(candidate_a_deg))[indices]
         )  # shape=(N_patterns, NUM_WAYPOINTS)
 
         # 各区間での角速度
@@ -403,11 +408,11 @@ class CarSim:
             予測経路の各区間での位置 shape=(N_patterns, NUM_WAYPOINTS, 2)
             車の初期位置からの相対座標で表される
         """
-        ds = v * self.auto_dt
+        ds = v * self.auto_estimate_dt
 
         # 各区間終了時（=経由点）の姿勢角
         yaw_end_patterns = np.cumsum(
-            w_patterns * self.auto_dt,
+            w_patterns * self.auto_estimate_dt,
             axis=1,
         )  # shape=(N_patterns, NUM_WAYPOINTS)
 
@@ -447,6 +452,39 @@ class CarSim:
         )  # shape=(N_patterns, NUM_WAYPOINTS, 2)
         return xy_patterns
 
+    def _set_auto_drive(self, v: float, edge_name: str):
+        AUTO_CONTROL_PER_METER = 0.1
+        self.share.state.auto_w_edge_name = edge_name
+
+        # 自動制御間隔を自動調整。現在速度でAUTO_CONTROL_PER_METER進む時間幅とする
+        self.auto_control_dt = (
+            None
+            if v == 0
+            else min(AUTO_CONTROL_PER_METER / abs(v), self.auto_estimate_dt)
+        )
+
+        if self.share.state.v != v:
+            # 加速度無限大で即座に反映
+            self.share.state.v = self._limit_two_sides(v, self.prop.max_velocity)
+            if self.debug_log:
+                print(
+                    f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w=auto to keep {edge_name}"
+                )
+
+    def _set_manual_drive(self, v: float, w: float):
+        self.share.state.auto_w_edge_name = None
+        self.auto_control_dt = None
+        if self.share.state.v != v or self.share.state.w != w:
+            # 加速度無限大で即座に反映
+            self.share.state.v = self._limit_two_sides(v, self.prop.max_velocity)
+            self.share.state.w = self._limit_two_sides(
+                w, math.radians(self.prop.max_rotate_deg)
+            )
+            if self.debug_log:
+                print(
+                    f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
+                )
+
     def _step(self):
         """
         車の位置・姿勢の更新を1step(=1微小区間分)だけ行いstateの時刻をself.drive_dtだけ進める。
@@ -458,7 +496,7 @@ class CarSim:
 
         - この関数は、微小区間の終わりの時刻が経過した瞬間に呼ぶこと。
           - その結果、ある微小区間の間に受けたコマンドは、その微小区間の始まりに遡って計算に反映される。
-          - 例えば、シミュレーション開始からself.drive_dt秒以内に秒速vで動けとのコマンドが来た場合
+          - 例えば、シミュレーション開始時刻0からself.drive_dt秒以内に秒速vで動けとのコマンドが来た場合
           - 速度指示はシミュレーション時刻0から有効であり、最初から速度vで動くことになる
         - コマンドは１つの微小区間で最大で１つのみ処理される
           - ある微小区間で複数のコマンドが来た場合でキューの最大サイズが1より大きい場合、処理されなかったコマンドは次の微小区間で順次処理される。
@@ -493,43 +531,22 @@ class CarSim:
                     self.share.state._t + command.t if command.t is not None else None
                 )
                 if command.auto_w_edge_name is not None:
-                    self.share.state.auto_w_edge_name = command.auto_w_edge_name
-                    if self.share.state.v != command.v:
-                        # 加速度無限大で即座に反映
-                        self.share.state.v = self._limit_two_sides(
-                            command.v, self.prop.max_velocity
-                        )
-                        if self.debug_log:
-                            print(
-                                f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w=auto to keep {command.auto_w_edge_name}"
-                            )
+                    self._set_auto_drive(command.v, command.auto_w_edge_name)
                 else:
-                    self.share.state.auto_w_edge_name = None
-                    if (
-                        self.share.state.v != command.v
-                        or self.share.state.w != command.w
-                    ):
-                        # 加速度無限大で即座に反映
-                        self.share.state.v = self._limit_two_sides(
-                            command.v, self.prop.max_velocity
-                        )
-                        self.share.state.w = self._limit_two_sides(
-                            command.w, math.radians(self.prop.max_rotate_deg)
-                        )
-                        if self.debug_log:
-                            print(
-                                f"[{self.share.state._t:.3f}] changed v={self.share.state.v:.3f}, w={self.share.state.w:.3f}"
-                            )
+                    self._set_manual_drive(command.v, command.w)
             elif isinstance(command, CameraCommand):
                 self.share.state.cam_pitch = command.pitch
             else:
                 raise ValueError(f"invalid command type: {type(command)}")
 
-        # auto_wの処理（自動的に適切なwを決定）
-        if self.share.state.auto_w_edge_name is not None and self.share.state.v != 0:
-            best_w = self._calc_auto_w()
-            self.share.state.w = best_w[0]
-            self.share.state.predict_w = best_w
+        # auto_wの処理（自動的に決定されたwを採用する）
+        if (
+            self.share.state.auto_w_edge_name is not None
+            and self.share.state.v != 0
+            and self.best_w is not None
+        ):
+            self.share.state.w = self.best_w[0]
+            self.share.state.predict_w = self.best_w
         else:
             self.share.state.predict_w = None
 
@@ -590,6 +607,7 @@ class CarSim:
         シミュレーションの実行にかかる時間が延びる。
 
         - 車の状態はself.drive_dt秒ごとのスナップショットとしてself.historyに記録される
+           - historyには開始時に初期状態が書き込まれれ、以降drive_dt秒ごとに状態が追記されていく
         """
         self._update_detect_state()
         self.history.record(self.share.state)  # 初期状態
@@ -624,11 +642,14 @@ class CarSim:
                 with self.share.lock:
                     t0 = time.thread_time()
                     self._step()
+                    t1 = time.thread_time()
+                    self.drive_stat.add(t1 - t0)
+
                     self.history.update_latest_vw(
                         self.share.state.v, self.share.state.w
                     )  # v,wの変更は遡って反映
-                    t1 = time.thread_time()
-                    self.drive_stat.add(t1 - t0)
+
+                    # 認識結果の更新はself.detect_dt秒ごとに行う
                     if (
                         self.share.state._t
                         >= self.share.state._t_last_detect + self.detect_dt
@@ -636,6 +657,19 @@ class CarSim:
                         self._update_detect_state()
                     t2 = time.thread_time()
                     self.detect_stat.add(t2 - t1)
+
+                    # auto_wの更新はself.auto_control_dt秒ごとに行う
+                    if (
+                        self.share.state._t
+                        >= self.share.state._t_last_auto_w + self.auto_control_dt
+                    ):
+                        self.best_w = self._calc_auto_w()
+                        self.share.state._t_last_auto_w = self.share.state._t
+                    else:
+                        self.best_w = None
+                    t3 = time.thread_time()
+                    self.auto_stat.add(t3 - t2)
+
                     self.history.record(self.share.state)
 
         if self._command_fail:
