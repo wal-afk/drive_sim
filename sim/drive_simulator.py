@@ -659,14 +659,15 @@ class CarSim:
                     self.detect_stat.add(t2 - t1)
 
                     # auto_wの更新はself.auto_control_dt秒ごとに行う
-                    if (
-                        self.share.state._t
-                        >= self.share.state._t_last_auto_w + self.auto_control_dt
-                    ):
-                        self.best_w = self._calc_auto_w()
-                        self.share.state._t_last_auto_w = self.share.state._t
-                    else:
-                        self.best_w = None
+                    if self.auto_control_dt is not None:
+                        if (
+                            self.share.state._t
+                            >= self.share.state._t_last_auto_w + self.auto_control_dt
+                        ):
+                            self.best_w = self._calc_auto_w()
+                            self.share.state._t_last_auto_w = self.share.state._t
+                        else:
+                            self.best_w = None
                     t3 = time.thread_time()
                     self.auto_stat.add(t3 - t2)
 
