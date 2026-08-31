@@ -601,7 +601,7 @@ class CarSim:
         self._update_detect_state()
         self.history.record(state)  # 初期状態
         t_start = time.perf_counter()
-        while not self.share.stop_event.is_set():
+        while self.alive():
             if self.mission.t_max is not None and state._t > self.mission.t_max:
                 print(f"!!!!!! time limit {self.mission.t_max}s: stop simulation")
                 break
@@ -682,7 +682,7 @@ class CarSim:
             "wait": self.com.wait,
         }
         try:
-            self.mission.command_func(**commands)
+            self.mission.command_func(self.alive, **commands)
             print(f"[{self.share.state._t:.3f}] command_func finished")
             return True
         except Exception as e:
@@ -692,6 +692,9 @@ class CarSim:
             print("")
             traceback.print_exc()
         return False
+
+    def alive(self) -> bool:
+        return not self.share.stop_event.is_set()
 
     def run(self) -> bool:
         """
