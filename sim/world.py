@@ -60,14 +60,53 @@ class WorldEdge:
         self.arc_smaller_deg: list[float] = []  # -180<=start_deg<180
         self.arc_bigger_deg: list[float] = []  # -180<end_deg<540, start_def<end_deg
 
+        self._last_end: np.ndarray | None = None  # shape=(2,)
+
     def _trans(self, xy: tuple[float, float]) -> tuple[float, float]:
         x, y = (np.asarray(xy) - np.asarray(self.center_xy)) @ self.R
         return (x, y)
 
-    def add_line(self, start: tuple[float, float], end: tuple[float, float]):
-        self.line_start.append(self._trans(start))
-        self.line_end.append(self._trans(end))
+    def _trans_inv(self, xy: tuple[float, float]) -> tuple[float, float]:
+        x, y = np.asarray(xy) @ self.R.T + np.asarray(self.center_xy)
+        return (x, y)
+
+    def auto_close(self):
+        if self._last_end is not None and len(self.line_start) > 0:
+            first_start = self.line_start[0]
+            if (np.asarray(first_start) != self._last_end).any():
+                self._add_line_after_trans(tuple(self._last_end), first_start)
+
+    def add_line(
+        self,
+        start: tuple[float, float],
+        end: tuple[float, float],
+        *,
+        auto_connect=False,
+    ):
+        """
+        edgeの一部として線分を追加する。
+        Args:
+            start: 線分の始点座標
+            end: 線分の終点座標
+            auto_connect: Trueの場合、前回の終点と一致しない場合に自動的に線分を追加する
+        """
+        _start = self._trans(start)
+        _end = self._trans(end)
+        if (
+            auto_connect
+            and self._last_end is not None
+            and (_start != self._last_end).any()
+        ):
+            self._add_line_after_trans(tuple(self._last_end), _start)
+        self._add_line_after_trans(_start, _end)
+
+    def _add_line_after_trans(
+        self, _start: tuple[float, float], _end: tuple[float, float]
+    ):
+        self.line_start.append(_start)
+        self.line_end.append(_end)
         self.order.append(0)
+        self._last_end = np.asarray(_end)
 
     def add_lines(self, xy: list[tuple[float, float]], loop=False):
         for i in range(len(xy) - 1):
@@ -83,31 +122,57 @@ class WorldEdge:
         end_deg: float,
         *,
         inverse=False,
+        auto_connect=False,
     ):
         """
-        start_degから反時計回りにend_degまでの円弧を表す。
-        inverse=Trueの場合は、start_degから時計回りにend_degまでの円弧を表す。
+        edgeの一部として円弧を追加する。
+
+        Args:
+            center: 円弧の中心座標
+            radius: 円弧の半径
+            start_deg: 円弧の始点角度（度）
+            end_deg: 円弧の終点角度（度）
+            inverse: Trueの場合、start_degから時計回りにend_degまでの円弧を表す。Falseの場合、start_degから反時計回りにend_degまでの円弧を表す。
+            auto_connect: Trueの場合、前回の終点と一致しない場合に自動的に線分を追加する
         """
-        self.arc_center.append(self._trans(center))
+        _center = self._trans(center)
+        self.arc_center.append(_center)
         self.arc_radius.append(radius)
         self.arc_inverse.append(inverse)
 
         start_deg -= self.rotate_deg
         end_deg -= self.rotate_deg
-
         _start_deg = (start_deg + 180) % 360 - 180  # -180<=value<180
-
         _end_deg = (end_deg + 180) % 360 - 180  # -180<=value<180
-        if _end_deg <= _start_deg:
-            _end_deg += 360  # -180<value<540
+
+        _start = np.asarray(_center) + radius * np.array(
+            [np.cos(np.deg2rad(_start_deg)), np.sin(np.deg2rad(_start_deg))]
+        )
+        _end = np.asarray(_center) + radius * np.array(
+            [np.cos(np.deg2rad(_end_deg)), np.sin(np.deg2rad(_end_deg))]
+        )
+
+        if (
+            auto_connect
+            and self._last_end is not None
+            and (_start != self._last_end).any()
+        ):
+            self._add_line_after_trans(tuple(self._last_end), _start)
 
         if inverse:
-            self.arc_smaller_deg.append(_end_deg)
-            self.arc_bigger_deg.append(_start_deg)
+            _smaller_deg = _end_deg
+            _bigger_deg = _start_deg
         else:
-            self.arc_smaller_deg.append(_start_deg)
-            self.arc_bigger_deg.append(_end_deg)
+            _smaller_deg = _start_deg
+            _bigger_deg = _end_deg
+
+        if _bigger_deg <= _smaller_deg:
+            _bigger_deg += 360  # -180<value<540
+        self.arc_smaller_deg.append(_smaller_deg)
+        self.arc_bigger_deg.append(_bigger_deg)
         self.order.append(1)
+
+        self._last_end = _end
 
     def _calc_lines_box(self) -> Box | None:
         if len(self.line_start) == 0:
@@ -169,6 +234,8 @@ class WorldEdge:
         指定点から右に伸ばした半直線がlineと何回交わるかを求める
         指定点が線上にいる場合はカウントしない
         """
+        if len(self.line_start) == 0:
+            return 0
         xy_start = np.asarray(self.line_start)
         xy_end = np.asarray(self.line_end)
 
@@ -188,11 +255,13 @@ class WorldEdge:
         指定点が線上にいる場合はカウントしない
         半直線があるarcと接する場合は2回と数える
         """
+        if len(self.arc_center) == 0:
+            return 0
         xy_center = np.asarray(self.arc_center)
         smaller_rad = np.deg2rad(np.asarray(self.arc_smaller_deg))  # -pi<=start_rad<pi
         bigger_rad = np.deg2rad(
             np.asarray(self.arc_bigger_deg)
-        )  # -pi<end_rad<3pi, start_rad<end_rad
+        )  # -pi<end_rad<3pi, smaller_rad<bigger_rad
         r = np.asarray(self.arc_radius)
 
         x, y = xy
@@ -222,7 +291,12 @@ class WorldEdge:
         is_cross_2_minus = (smaller_rad < theta_minus + 2 * np.pi) & (
             theta_minus + 2 * np.pi < bigger_rad
         )
-        is_cross_minus = (x < cross_x_minus) & (is_cross_1_minus | is_cross_2_minus)
+        is_cross_3_minus = (smaller_rad < theta_minus - 2 * np.pi) & (
+            theta_minus - 2 * np.pi < bigger_rad
+        )
+        is_cross_minus = (x < cross_x_minus) & (
+            is_cross_1_minus | is_cross_2_minus | is_cross_3_minus
+        )
         return int(np.sum(is_cross_plus) + np.sum(is_cross_minus))
 
     def contains(self, xy: tuple[float, float]) -> bool:
@@ -313,11 +387,16 @@ class WorldEdge:
             points[:, np.newaxis, :] - line_start[np.newaxis, :, :]
         )  # shape=(N,K,2)
 
-        t = np.dot(pos_vec, line_vec) / np.dot(line_vec, line_vec)  # shape=(N,K)
+        t = np.sum(pos_vec * line_vec, axis=-1) / np.sum(
+            line_vec * line_vec, axis=-1
+        )  # shape=(N,K)
         t = np.clip(t, 0.0, 1.0)  # 線分なので 0～1 に制限
 
         # 線分上で最も近い点
-        closest = line_start + t * line_vec  # shape=(N,K,2)
+        closest = (
+            line_start[np.newaxis, :, :]
+            + t[:, :, np.newaxis] * line_vec[np.newaxis, :, :]
+        )  # shape=(N,K,2)
         dist = np.linalg.norm(points[:, np.newaxis, :] - closest, axis=2)  # shape=(N,K)
         min_dist = dist.min(axis=1)  # shape=(N)
 
@@ -375,6 +454,7 @@ class WorldEdge:
 class World:
     def __init__(self):
         self.edges: dict[str, WorldEdge] = {}
+        self.auto_edge_names: tuple[str, str, str] | None = None  # (center,inner,outer)
 
     def add_edge(self, edge: WorldEdge):
         self.edges[edge.name] = edge
@@ -382,6 +462,41 @@ class World:
     def add_edges(self, edges: list[WorldEdge]):
         for edge in edges:
             self.add_edge(edge)
+
+    def set_auto_edge(
+        self,
+        center_edge_name: str,
+        inner_edge_name: str,
+        outer_edge_name: str,
+    ):
+        """
+        auto命令実行時に従うべきedgeの名前を設定する
+        Args:
+            center_edge_name (str): autoにおいて走行するラインを表すedgeの名前
+            inner_edge_name (str): autoの実行可否を決めるedgeの名前。このedgeの外側にいる場合のみautoは実行可能
+            outer_edge_name (str): autoの実行可否を決めるedgeの名前。このedgeの内側にいる場合のみautoは実行可能
+        """
+        if center_edge_name not in self.edges:
+            raise ValueError(f"Target edge '{center_edge_name}' does not exist.")
+        if inner_edge_name not in self.edges:
+            raise ValueError(f"Valid inner edge '{inner_edge_name}' does not exist.")
+        if outer_edge_name not in self.edges:
+            raise ValueError(f"Valid outer edge '{outer_edge_name}' does not exist.")
+
+        self.auto_edge_names = (
+            center_edge_name,
+            inner_edge_name,
+            outer_edge_name,
+        )
+
+    def get_auto_edges(self) -> tuple[WorldEdge, WorldEdge, WorldEdge] | None:
+        if self.auto_edge_names is None:
+            return None
+        return (
+            self.edges[self.auto_edge_names[0]],
+            self.edges[self.auto_edge_names[1]],
+            self.edges[self.auto_edge_names[2]],
+        )
 
     def get_bounding_box(self) -> Box | None:
         boxes = [edge.get_bounding_box() for edge in self.edges.values()]

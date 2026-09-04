@@ -3,7 +3,7 @@ import time
 import threading
 from dataclasses import dataclass
 import math
-from queue import Queue
+from queue import Queue, Full
 import traceback
 
 import numpy as np
@@ -118,8 +118,19 @@ class Commander:
     def __init__(self, sim: CarSim):
         self.sim = sim
 
+    def _put_command(self, command: SpeedCommand | CameraCommand) -> bool:
+        # sim_threadがcommandsを消費しなくなった後もput()が永久にブロックしないよう、停止を定期的に確認しながらputする
+        while not self.sim.share.stop_event.is_set():
+            try:
+                self.sim.share.commands.put(command, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
+
     def _send_auto_speed_cmd(self, v: float, edge_name: str, t: float | None = None):
-        self.sim.share.commands.put(SpeedCommand(v=v, auto_w_edge_name=edge_name, t=t))
+        if not self._put_command(SpeedCommand(v=v, auto_w_edge_name=edge_name, t=t)):
+            return
         state = self.sim.share.state
         if t is not None:
             state._time_cmd_issued += 1
@@ -129,7 +140,8 @@ class Commander:
             )
 
     def _send_manual_speed_cmd(self, v: float, w_rad: float, t: float | None = None):
-        self.sim.share.commands.put(SpeedCommand(v=v, w=w_rad, t=t))
+        if not self._put_command(SpeedCommand(v=v, w=w_rad, t=t)):
+            return
         state = self.sim.share.state
         if t is not None:
             state._time_cmd_issued += 1
@@ -139,7 +151,8 @@ class Commander:
             )
 
     def _send_camera_cmd(self, pitch_rad: float):
-        self.sim.share.commands.put(CameraCommand(pitch_rad))
+        if not self._put_command(CameraCommand(pitch_rad)):
+            return
         state = self.sim.share.state
         if self.sim.debug_log:
             print(f"[{state._t:.3f}] put camera command pitch={pitch_rad}")
@@ -156,17 +169,36 @@ class Commander:
         else:
             self._send_manual_speed_cmd(v, v / r, t)
 
-    def auto(self, v: float, edge_name: str | None = None, t: float | None = None):
+    def auto(self, v: float, t: float | None = None):
         """
+        自動走行を開始を指示する。自動走行開始可能な条件を満たさない場合、Falseを返す。
         Args:
             v: 前進速度[m/秒]。正の値は前進、負の値は後退
-            edge_name: 角速度を自動的に決定する為の目標のedgeの名前。Noneの場合はworldに設定されている最初のedgeを目標とする
             t: 継続秒数[秒]
+
+        Returns:
+            bool: 自動走行開始を指示した場合はTrue、指示できなかった場合はFalse
         """
-        if edge_name is None:
-            edges = list(self.sim.mission.world.edges.values())
-            edge_name = edges[0].name
-        self._send_auto_speed_cmd(v, edge_name, t)
+        state = self.sim.share.state
+        auto_edges = self.sim.mission.world.get_auto_edges()
+        if auto_edges is None:
+            print(
+                f"[{state._t:.3f}] cannot execute auto command because world has no auto_edge."
+            )
+            return False
+        center, inner, outer = auto_edges
+        if not outer.contains([state.x, state.y]):
+            print(
+                f"[{state._t:.3f}] cannot execute auto command because car is outside the outer edge."
+            )
+            return False
+        if inner.contains([state.x, state.y]):
+            print(
+                f"[{state._t:.3f}] cannot execute auto command because car is inside the inner edge."
+            )
+            return False
+        self._send_auto_speed_cmd(v, center.name, t)
+        return True
 
     def rotate(self, w: float, t: float | None = None):
         """
@@ -598,6 +630,15 @@ class CarSim:
            - historyには開始時に初期状態が書き込まれれ、以降drive_dt秒ごとに状態が追記されていく
         """
         state = self.share.state
+        try:
+            self._run_sim_loop(state)
+        except Exception:
+            # 例外で終了した場合もcommand_thread側のwaitが永久に残らないよう停止を通知する
+            self.share.stop_event.set()
+            print("プログラム（sim_all）にエラーが発生しました")
+            traceback.print_exc()
+
+    def _run_sim_loop(self, state: VehicleState):
         self._update_detect_state()
         self.history.record(state)  # 初期状態
         t_start = time.perf_counter()
@@ -668,8 +709,10 @@ class CarSim:
             print(f"    ideal {state._t / self.throttle:.3f}s")
 
     def _call_command_func(self) -> bool:
-        # simlationが始まるまで待つ
+        # simlationが始まるまで待つ（sim_threadが例外等で終了した場合もここで止まり続けないようalive()も見る）
         while len(self.history.ts) == 0:
+            if not self.alive():
+                return False
             time.sleep(0)  # GILを開放し他のスレッドの処理を進める
 
         commands = {
@@ -682,7 +725,7 @@ class CarSim:
             "wait": self.com.wait,
         }
         try:
-            self.mission.command_func(self.alive, **commands)
+            self.mission.command_func(self.com.alive, **commands)
             print(f"[{self.share.state._t:.3f}] command_func finished")
             return True
         except Exception as e:
@@ -720,7 +763,7 @@ class CarSim:
         finally:
             self.share.stop_event.set()
             while command_thread.is_alive() or sim_thread.is_alive():
-                time.sleep(0)  # GILを開放し他のスレッドの処理を進める
+                time.sleep(1 / self.throttle)  # GILを開放し他のスレッドの処理を進める
             if self._command_fail:
                 return False
             else:
