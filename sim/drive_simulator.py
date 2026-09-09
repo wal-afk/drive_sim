@@ -121,6 +121,7 @@ class ControllerSharedData:
 class Commander:
     def __init__(self, sim: CarSim):
         self.sim = sim
+        self.last_auto_fail_pos = None
 
     def _put_command(self, command: SpeedCommand | CameraCommand) -> bool:
         self.sim.share.commands.append(command)
@@ -202,16 +203,23 @@ class Commander:
             )
             return False
         center, inner, outer = auto_edges
-        if not outer.contains((state.x, state.y)):
-            print(
-                f"[{state._t:.3f}] cannot execute auto command because car is outside the outer edge."
-            )
+
+        pos = (state.x, state.y)
+        if not outer.contains(pos):
+            if self.last_auto_fail_pos != pos:
+                print(
+                    f"[{state._t:.3f}] cannot execute auto command because car is outside the outer edge."
+                )
+            self.last_auto_fail_pos = pos
             return False
-        if inner.contains((state.x, state.y)):
-            print(
-                f"[{state._t:.3f}] cannot execute auto command because car is inside the inner edge."
-            )
+        if inner.contains(pos):
+            if self.last_auto_fail_pos != pos:
+                print(
+                    f"[{state._t:.3f}] cannot execute auto command because car is inside the inner edge."
+                )
+            self.last_auto_fail_pos = pos
             return False
+        self.last_auto_fail_pos = None
         self._send_auto_speed_cmd(v, center.name, t)
         return True
 
