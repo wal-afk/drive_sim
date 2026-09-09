@@ -1,5 +1,6 @@
 from __future__ import annotations
 import math
+from typing import Callable
 
 import numpy as np
 
@@ -48,7 +49,7 @@ class MissionBase:
         self.world = world
 
     @staticmethod
-    def command_func(**kwargs):
+    def command_func(alive: Callable[[], bool], **kwargs):
         raise NotImplementedError("command_func must be implemented in subclass")
 
     def get_random_xy_box(self) -> Box:
@@ -113,7 +114,7 @@ class MissionBase:
     def relocate_signs(self):
         for sign in self.signs:
             sign.relocate()
-            
+
         self.signs_pos_world = np.array(
             [[m.x, m.y] for m in self.signs], dtype=np.float32
         )

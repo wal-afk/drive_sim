@@ -3,7 +3,7 @@ import time
 import threading
 from dataclasses import dataclass
 import math
-from queue import Queue, Full
+from collections import deque
 import traceback
 
 import numpy as np
@@ -21,18 +21,22 @@ class SpeedCommand:
     auto_w_edge_nameにNone以外を指定した場合、wの指定は無視され、自動的に適切なwが選ばれる
     """
 
-    v: float = 0.0
-    w: float = 0.0
+    v: float = 0.0  # [m/s]
+    w: float = 0.0  # [rad/s]
     auto_w_edge_name: str | None = None
 
     # コマンドの有効時間。有効時間経過後にはv=0,w=0に戻る。0を指定しても1フレーム分はコマンドが有効になる。
     # Noneを指定した場合、永遠にコマンドは有効になる。
     t: float | None = None
 
+    t_created: float | None = None
+
 
 @dataclass
 class CameraCommand:
-    pitch: float = 0.0
+    pitch: float = 0.0  # [rad]
+
+    t_created: float | None = None
 
 
 class History:
@@ -109,7 +113,7 @@ class ControllerSharedData:
 
     def reset(self, initial_state: VehicleState):
         self.state = initial_state
-        self.commands: Queue = Queue(maxsize=1)  # 暫定：コマンドは最大1件まで保持
+        self.commands: deque = deque(maxlen=1)  # 暫定：コマンドは最大1件まで保持
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
 
@@ -119,43 +123,54 @@ class Commander:
         self.sim = sim
 
     def _put_command(self, command: SpeedCommand | CameraCommand) -> bool:
-        # sim_threadがcommandsを消費しなくなった後もput()が永久にブロックしないよう、停止を定期的に確認しながらputする
-        while not self.sim.share.stop_event.is_set():
-            try:
-                self.sim.share.commands.put(command, timeout=0.1)
-                return True
-            except Full:
-                continue
-        return False
+        self.sim.share.commands.append(command)
+        state = self.sim.share.state
+        if isinstance(command, SpeedCommand):
+            if command.t is not None:
+                state._time_cmd_issued += 1
+            if self.sim.debug_log:
+                print(
+                    "[{:.3f}] put speed command v={}, w={}, t={}".format(
+                        state._t,
+                        command.v,
+                        (
+                            command.w
+                            if command.w is not None
+                            else f"auto to keep {command.auto_w_edge_name}"
+                        ),
+                        command.t,
+                    )
+                )
+        elif isinstance(command, CameraCommand):
+            if self.sim.debug_log:
+                print(
+                    "[{:.3f}] put camera command pitch={}".format(
+                        state._t, command.pitch
+                    )
+                )
+        else:
+            raise Exception("Unknown command type")
+        time.sleep(
+            0.03 / self.sim.throttle
+        )  # コマンドはsim時間内で0.03秒置きに律速する
+        return True
 
     def _send_auto_speed_cmd(self, v: float, edge_name: str, t: float | None = None):
-        if not self._put_command(SpeedCommand(v=v, auto_w_edge_name=edge_name, t=t)):
-            return
-        state = self.sim.share.state
-        if t is not None:
-            state._time_cmd_issued += 1
-        if self.sim.debug_log:
-            print(
-                f"[{state._t:.3f}] put speed command v={v}, w=auto to keep {edge_name}, t={t}, _time_cmd_issued={state._time_cmd_issued}"
+        return self._put_command(
+            SpeedCommand(
+                v=v, auto_w_edge_name=edge_name, t=t, t_created=self.sim.share.state._t
             )
+        )
 
     def _send_manual_speed_cmd(self, v: float, w_rad: float, t: float | None = None):
-        if not self._put_command(SpeedCommand(v=v, w=w_rad, t=t)):
-            return
-        state = self.sim.share.state
-        if t is not None:
-            state._time_cmd_issued += 1
-        if self.sim.debug_log:
-            print(
-                f"[{state._t:.3f}] put speed command v={v}, w={w_rad}, t={t}, _time_cmd_issued={state._time_cmd_issued}"
-            )
+        return self._put_command(
+            SpeedCommand(v=v, w=w_rad, t=t, t_created=self.sim.share.state._t)
+        )
 
     def _send_camera_cmd(self, pitch_rad: float):
-        if not self._put_command(CameraCommand(pitch_rad)):
-            return
-        state = self.sim.share.state
-        if self.sim.debug_log:
-            print(f"[{state._t:.3f}] put camera command pitch={pitch_rad}")
+        return self._put_command(
+            CameraCommand(pitch_rad, t_created=self.sim.share.state._t)
+        )
 
     def move(self, v: float, r: float | None = None, t: float | None = None):
         """
@@ -187,12 +202,12 @@ class Commander:
             )
             return False
         center, inner, outer = auto_edges
-        if not outer.contains([state.x, state.y]):
+        if not outer.contains((state.x, state.y)):
             print(
                 f"[{state._t:.3f}] cannot execute auto command because car is outside the outer edge."
             )
             return False
-        if inner.contains([state.x, state.y]):
+        if inner.contains((state.x, state.y)):
             print(
                 f"[{state._t:.3f}] cannot execute auto command because car is inside the inner edge."
             )
@@ -541,11 +556,18 @@ class CarSim:
                 )
 
         # commandの処理
-        if not self.share.commands.empty():
-            command = self.share.commands.get(block=False)
+        if len(self.share.commands) > 0:
+            command = self.share.commands.pop()
             if self.debug_log:
                 print(
-                    f"[{state._t:.3f}] recv command remained:{self.share.commands.qsize()}"
+                    "[{:.3f}] recv command: delay={}".format(
+                        state._t,
+                        (
+                            state._t - command.t_created
+                            if command.t_created is not None
+                            else "N/A"
+                        ),
+                    )
                 )
             if isinstance(command, SpeedCommand):
                 if state._t_cancel is not None:
