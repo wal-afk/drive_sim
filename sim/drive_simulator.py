@@ -136,7 +136,7 @@ class Commander:
                         command.v,
                         (
                             command.w
-                            if command.w is not None
+                            if command.auto_w_edge_name is None
                             else f"auto to keep {command.auto_w_edge_name}"
                         ),
                         command.t,
