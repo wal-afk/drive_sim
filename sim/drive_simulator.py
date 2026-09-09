@@ -938,7 +938,10 @@ class CarSim:
                     continue
                 state._t_last_auto_w_calc_start = state._t
                 self.predict_w = self._calc_auto_w()
-                print(f"[{self.share.state._t:.3f}] predict auto_w: {self.predict_w}")
+                if self.debug_log:
+                    print(
+                        f"[{self.share.state._t:.3f}] predict auto_w: {self.predict_w}"
+                    )
                 state._t_last_auto_w_calc_end = state._t
 
     def _wait_for_next_calc_auto_w(self):
