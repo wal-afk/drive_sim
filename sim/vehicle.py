@@ -16,9 +16,10 @@ class VehicleState:
     # driveシミュレーションからのみ更新（更新にlockが必要。複数の値を同時に読む場合はlockが必要）
     _time_cmd_ended: int = 0  # 有効時間ありで発行されたコマンドの累計完了数
     _t_cancel: float | None = None  # 命令キャンセル予定のシミュレーション時刻
-    _t: float = (
-        0.0  # シミュレーション時刻（=driveシミュレーションにおける最終更新時刻）
-    )
+
+    # シミュレーション時刻（=driveシミュレーションにおける最終更新時刻）
+    _t: float = 0.0
+
     x: float = 0.0  # 車両の世界座標系でのx座標
     y: float = 0.0  # 車両の世界座標系でのy座標
     yaw: float = 0.0  # 車両の世界座標系でのヨー角（ラジアン）
@@ -35,7 +36,12 @@ class VehicleState:
         default_factory=list
     )  # 車両座標系での路面標識(xが近い順にソート済)
     _t_last_detect: float = 0.0  # detectシミュレーションにおける最終更新時刻
-    _t_last_auto_w: float = 0.0  # autoシミュレーションにおける最終更新時刻
+    _t_last_auto_w_calc_start: float = (
+        0.0  # 最後のautoシミュレーションにおける計算開始時刻
+    )
+    _t_last_auto_w_calc_end: float = (
+        0.0  # 最後のautoシミュレーションにおける計算終了時刻
+    )
     _t_stop: float | None = 0.0  # 停止状態になった時刻
 
 
@@ -136,3 +142,7 @@ class VehicleProp:
             return max_overshoot / self.max_velocity
         elif max_overshoot_deg is not None:
             return max_overshoot_deg / self.max_rotate_deg
+        else:
+            raise Exception(
+                "Either max_overshoot or max_overshoot_deg must be specified"
+            )
