@@ -16,9 +16,11 @@ from .calc import Box, world_coord_to_vehicle_coord, vehicle_coord_to_world_coor
 class BaseCommand:
     def __init__(
         self,
+        name: str,
         *,
         t_created: float | None = None,
     ):
+        self.name = name
         self.t_created = t_created
 
     def equal(self, command: BaseCommand) -> bool:
@@ -40,7 +42,7 @@ class SpeedCommand(BaseCommand):
         auto_w_edge_name: str | None = None,
         t_created: float | None = None,
     ):
-        super().__init__(t_created=t_created)
+        super().__init__("speed", t_created=t_created)
         self.v = v  # [m/s]
         self.w = w  # [rad/s]
 
@@ -53,7 +55,8 @@ class SpeedCommand(BaseCommand):
     def equal(self, command: BaseCommand) -> bool:
         if isinstance(command, SpeedCommand):
             return (
-                self.v == command.v
+                self.name == command.name
+                and self.v == command.v
                 and self.w == command.w
                 and self.t == command.t
                 and self.t is None
@@ -65,13 +68,22 @@ class SpeedCommand(BaseCommand):
 class CameraCommand(BaseCommand):
 
     def __init__(self, pitch: float = 0.0, *, t_created: float | None = None):
-        super().__init__(t_created=t_created)
+        super().__init__("camera", t_created=t_created)
         self.pitch = pitch  # [rad]
 
     def equal(self, command: BaseCommand) -> bool:
         if isinstance(command, CameraCommand):
-            return self.pitch == command.pitch and self.t_created == command.t_created
+            return self.name == command.name and self.pitch == command.pitch
         return False
+
+
+class DummyCommand(BaseCommand):
+
+    def __init__(self, *, t_created: float | None = None):
+        super().__init__("dummy", t_created=t_created)
+
+    def equal(self, command: BaseCommand) -> bool:
+        return self.name == command.name
 
 
 class History:
@@ -149,7 +161,6 @@ class ControllerSharedData:
     def reset(self, initial_state: VehicleState):
         self.state = initial_state
         self.commands: deque = deque(maxlen=1)  # 暫定：コマンドは最大1件まで保持
-        self.lock = threading.Lock()
         self.stop_event = threading.Event()
 
 
@@ -161,20 +172,32 @@ class Commander:
 
     def _put_command(self, command: BaseCommand) -> bool:
         if self.last_command is not None and command.equal(self.last_command):
-            time.sleep(
-                0.03 / self.sim.throttle
-            )  # コマンドはsim時間内で0.03秒置きに律速する
-            return False
+            if self.sim.real_sim_mode:
+                time.sleep(
+                    0.03 / self.sim.throttle
+                )  # コマンドはsim時間内で0.03秒置きに律速する
+                return False
+            else:
+                if len(self.sim.share.commands) == 0:
+                    self.sim.share.commands.append(
+                        DummyCommand(t_created=self.sim.share.state._t)
+                    )
+                time.sleep(0)  # GILを開放
+
+                return False
 
         self.sim.share.commands.append(command)
+        self.last_command = command
+
         state = self.sim.share.state
         if isinstance(command, SpeedCommand):
             if command.t is not None:
                 state._time_cmd_issued += 1
             if self.sim.debug_log:
                 print(
-                    "[{:.3f}] put speed command v={}, w={}, t={}, auto={}".format(
+                    "[{:.3f}] put command name={}, v={}, w={}, t={}, auto={}".format(
                         state._t,
+                        command.name,
                         command.v,
                         (command.w if command.auto_w_edge_name is None else "auto"),
                         command.t,
@@ -186,24 +209,21 @@ class Commander:
                     )
                 )
         elif isinstance(command, CameraCommand):
-            if self.last_command is not None and command.equal(self.last_command):
-                time.sleep(
-                    0.03 / self.sim.throttle
-                )  # コマンドはsim時間内で0.03秒置きに律速する
-                return False
             if self.sim.debug_log:
                 print(
                     "[{:.3f}] put camera command pitch={}".format(
                         state._t, command.pitch
                     )
                 )
+        elif isinstance(command, DummyCommand):
+            pass
         else:
             raise Exception("Unknown command type")
 
-        self.last_command = command
-        time.sleep(
-            0.03 / self.sim.throttle
-        )  # コマンドはsim時間内で0.03秒置きに律速する
+        if self.sim.real_sim_mode:
+            time.sleep(
+                0.03 / self.sim.throttle
+            )  # コマンドはsim時間内で0.03秒置きに律速する
         return True
 
     def _send_auto_speed_cmd(self, v: float, edge_name: str, t: float | None = None):
@@ -222,6 +242,9 @@ class Commander:
         return self._put_command(
             CameraCommand(pitch_rad, t_created=self.sim.share.state._t)
         )
+
+    def _send_dummy_cmd(self):
+        return self._put_command(DummyCommand(t_created=self.sim.share.state._t))
 
     def move(self, v: float, r: float | None = None, t: float | None = None):
         """
@@ -313,8 +336,16 @@ class Commander:
         state = self.sim.share.state
         if self.sim.debug_log:
             print(f"[{state._t:.3f}] start wait")
-        while state._time_cmd_issued > state._time_cmd_ended and self.alive():
-            time.sleep(0)  # GILを開放し他のスレッドの処理を進める
+        if self.sim.real_sim_mode:
+            while state._time_cmd_issued > state._time_cmd_ended and self.alive():
+                time.sleep(0)  # GILを開放し他のスレッドの処理を進める
+        else:
+            while state._time_cmd_issued > state._time_cmd_ended and self.alive():
+                if len(self.sim.share.commands) == 0:
+                    self._send_dummy_cmd()
+                if len(self.sim.share.commands) != 0:
+                    time.sleep(0)  # GILを開放し他のスレッドの処理を進める
+
         if self.sim.debug_log:
             print(f"[{state._t:.3f}] exit wait")
 
@@ -349,6 +380,7 @@ class CarSim:
         detect_dt: float | None = None,
         auto_estimate_dt: float = 1.0,
         throttle: float = 20,
+        real_sim_mode=False,
         *,
         debug_log=False,
     ):
@@ -360,8 +392,10 @@ class CarSim:
             detect_dt: 認識結果の更新間隔[秒]
             auto_estimate_dt: 自動的に適切なwを計算する際の予測区間間隔[秒]
             throttle: シミュレーションの実行速度。1.0の場合、シミュレーション時間と実時間は同じ。10の場合、10倍の速さで処理される。
+            real_sim_mode: Trueの場合、実時間のthrottle倍の速さでリアルタイムシミュレーションを行う（スレッド間の計算速度に影響される）。Flaseの場合、待ち合わせ処理でシミュレーションする。
         """
         self.debug_log = debug_log
+        self.real_sim_mode = real_sim_mode
         if drive_dt is None:
             drive_dt = prop.calc_recomended_dt(
                 0.01, 5
@@ -457,6 +491,13 @@ class CarSim:
         state = self.share.state
         assert state.auto_w_edge_name is not None
 
+        # stateが変わる可能性があるのでコピーする。本来はLockが必要
+        _w = state.w
+        _x = state.x
+        _y = state.y
+        _v = state.v
+        _yaw = state.yaw
+
         target_edge = self.mission.world.edges.get(state.auto_w_edge_name)
 
         if target_edge is None:
@@ -477,19 +518,19 @@ class CarSim:
         )  # shape=(N_patterns, NUM_WAYPOINTS)
 
         # 各区間での角速度
-        w_patterns = state.w + np.cumsum(
+        w_patterns = _w + np.cumsum(
             dw_patterns, axis=1
         )  # shape=(N_patterns, NUM_WAYPOINTS)
         max_rotate_rad = math.radians(self.prop.max_rotate_deg) / 4
         w_patterns = np.clip(w_patterns, -max_rotate_rad, max_rotate_rad)
         xy_patterns_local = self._predict_xy_from_w(
-            w_patterns, state.v
+            w_patterns, _v
         )  # local座標系での軌跡
         xy_patterns_wprld = vehicle_coord_to_world_coord(
             xy_patterns_local,
-            state.x,
-            state.y,
-            state.yaw,
+            _x,
+            _y,
+            _yaw,
         )
 
         score_patterns = target_edge.calc_rms_distance(
@@ -554,9 +595,13 @@ class CarSim:
         return xy_patterns
 
     def _set_auto_drive(self, v: float, edge_name: str):
-        AUTO_CONTROL_PER_METER = 0.1
         state = self.share.state
         state.auto_w_edge_name = edge_name
+
+        if self.real_sim_mode:
+            AUTO_CONTROL_PER_METER = 0.1
+        else:
+            AUTO_CONTROL_PER_METER = 0.2
 
         # 自動制御間隔を自動調整。現在速度でAUTO_CONTROL_PER_METER進む時間幅とする
         self.auto_control_dt = (
@@ -616,10 +661,12 @@ class CarSim:
         # commandの処理
         if len(self.share.commands) > 0:
             command = self.share.commands.pop()
-            if self.debug_log:
+
+            if self.debug_log and command.name != "dummy":
                 print(
-                    "[{:.3f}] recv command: delay={:.3f}".format(
+                    "[{:.3f}] recv command: {} delay={:.3f}".format(
                         state._t,
+                        command.name,
                         (
                             state._t - command.t_created
                             if command.t_created is not None
@@ -627,6 +674,7 @@ class CarSim:
                         ),
                     )
                 )
+
             if isinstance(command, SpeedCommand):
                 if state._t_cancel is not None:
                     # 有効時間ありのコマンドが実行中に次のコマンドが来たら、有効時間ありのコマンドは終了扱いとする
@@ -642,10 +690,12 @@ class CarSim:
                     self._set_manual_drive(command.v, command.w)
             elif isinstance(command, CameraCommand):
                 state.cam_pitch = command.pitch
+            elif isinstance(command, DummyCommand):
+                pass
             else:
                 raise ValueError(f"invalid command type: {type(command)}")
 
-            # auto_wの処理（自動的に決定されたwを採用する）
+        # auto_wの処理（自動的に決定されたwを採用する）
         best_w = self._get_best_w()
         if best_w is not None:
             state.w = best_w
@@ -724,74 +774,127 @@ class CarSim:
         - 車の状態はself.drive_dt秒ごとのスナップショットとしてself.historyに記録される
            - historyには開始時に初期状態が書き込まれれ、以降drive_dt秒ごとに状態が追記されていく
         """
-        state = self.share.state
         try:
-            self._run_sim_loop(state)
+            state = self.share.state
+            self._update_detect_state()
+            self.history.record(state)  # 初期状態
+            t_start = time.perf_counter()
+
+            if self.real_sim_mode:
+                self._run_sim_loop_real_mode()
+            else:
+                self._run_sim_loop_sync_mode()
+
+            if not self._command_fail:
+                # 停止状態で終了する場合は、停止継続時間を無限大と見做してゴール判定をしなおす
+                if state.v == 0 and state.w == 0:
+                    goal_newly_reached = self._check_goal_completion(float("inf"))
+                    if goal_newly_reached:
+                        self._increase_goal_cnt(True)
+                        self.history.update_latest_goal_cnt(state._goal_cnt)
+
+                print(f"[{state._t:.3f}] simulation_func finished")
+                print(f"    takes {time.perf_counter() - t_start:.3f}s")
+                if self.real_sim_mode:
+                    print(f"    ideal {state._t / self.throttle:.3f}s")
+
         except Exception:
             # 例外で終了した場合もcommand_thread側のwaitが永久に残らないよう停止を通知する
             self.share.stop_event.set()
             print("プログラム（sim_all）にエラーが発生しました")
             traceback.print_exc()
 
-    def _run_sim_loop(self, state: VehicleState):
-        self._update_detect_state()
-        self.history.record(state)  # 初期状態
+    def _run_sim_loop_real_mode(self):
+        state = self.share.state
         t_start = time.perf_counter()
         while self.alive():
-            if self.mission.t_max is not None and state._t > self.mission.t_max:
-                print(f"!!!!!! time limit {self.mission.t_max}s: stop simulation")
+            if self._should_stop_sim():
                 break
-
-            if state.v == 0 and state.w == 0:
-                if self._stopped_from is None:
-                    self._stopped_from = state._t
-                else:
-                    if (
-                        self._stopped_from + self.mission.force_exit_stopping_sec
-                        < state._t
-                    ):
-                        print(
-                            f"!!!!!! force exit because stopping for {self.mission.force_exit_stopping_sec}sec"
-                        )
-                        break
-            else:
-                self._stopped_from = None
 
             elapsed_sim_time = (time.perf_counter() - t_start) * self.throttle
             if elapsed_sim_time < state._t + self.drive_dt:
                 time.sleep(0)  # GILを開放し他のスレッドの処理を進める
             else:
-                with self.share.lock:
-                    t0 = time.thread_time()
-                    self._step()
-                    t1 = time.thread_time()
-                    self.drive_stat.add(t1 - t0)
+                t0 = time.thread_time()
+                self._step()
+                t1 = time.thread_time()
+                self.drive_stat.add(t1 - t0)
 
-                    self.history.update_latest_vw(
-                        state.v, state.w
-                    )  # v,wの変更は遡って反映
+                self.history.update_latest_vw(state.v, state.w)  # v,wの変更は遡って反映
 
-                    # 認識結果の更新はself.detect_dt秒ごとに行う
-                    if state._t >= state._t_last_detect + self.detect_dt:
-                        self._update_detect_state()
-                    t2 = time.thread_time()
-                    self.detect_stat.add(t2 - t1)
+                # 認識結果の更新はself.detect_dt秒ごとに行う
+                if state._t >= state._t_last_detect + self.detect_dt:
+                    self._update_detect_state()
+                t2 = time.thread_time()
+                self.detect_stat.add(t2 - t1)
 
-                    self.history.record(state)
+                self.history.record(state)
 
-        if self._command_fail:
-            return
+    def _run_sim_loop_sync_mode(self):
+        state = self.share.state
+        t_last_cmd_recv = None
+        while self.alive():
+            if self._should_stop_sim():
+                break
+
+            # auto_w計算スレッドの待ち合わせ
+            if self.auto_control_dt is not None:
+                if (
+                    state._t_last_auto_w_calc_end is None
+                    or state._t >= state._t_last_auto_w_calc_end + self.auto_control_dt
+                ):
+                    time.sleep(0)  # GILを開放
+                    continue
+
+            # userプログラム実行スレッドの待ち合わせ
+            if len(self.share.commands) == 0:
+                if t_last_cmd_recv is None:
+                    time.sleep(0)  # GILを開放
+                    continue
+                else:
+                    if time.time() - t_last_cmd_recv < 1:
+                        time.sleep(0)  # GILを開放
+                        continue
+                    else:
+                        # 1秒以上userプログラムからコマンドが来ない場合、step()に進む
+                        pass
+            else:
+                t_last_cmd_recv = time.time()
+
+            t0 = time.thread_time()
+            self._step()
+            t1 = time.thread_time()
+            self.drive_stat.add(t1 - t0)
+
+            self.history.update_latest_vw(state.v, state.w)  # v,wの変更は遡って反映
+
+            # 認識結果の更新はself.detect_dt秒ごとに行う
+            if state._t >= state._t_last_detect + self.detect_dt:
+                self._update_detect_state()
+            t2 = time.thread_time()
+            self.detect_stat.add(t2 - t1)
+
+            self.history.record(state)
+
+    def _should_stop_sim(self):
+        state = self.share.state
+        if self.mission.t_max is not None and state._t > self.mission.t_max:
+            print(f"!!!!!! time limit {self.mission.t_max}s: stop simulation")
+            return True
+
+        # force_exit_stopping_sec秒間、車が停車している場合はシミュレーションを終了する
+        if state.v == 0 and state.w == 0:
+            if self._stopped_from is None:
+                self._stopped_from = state._t
+            else:
+                if self._stopped_from + self.mission.force_exit_stopping_sec < state._t:
+                    print(
+                        f"!!!!!! force exit because stopping for {self.mission.force_exit_stopping_sec}sec"
+                    )
+                    return True
         else:
-            # 停止状態で終了する場合は、停止継続時間を無限大と見做してゴール判定をしなおす
-            if state.v == 0 and state.w == 0:
-                goal_newly_reached = self._check_goal_completion(float("inf"))
-                if goal_newly_reached:
-                    self._increase_goal_cnt(True)
-                    self.history.update_latest_goal_cnt(state._goal_cnt)
-
-            print(f"[{state._t:.3f}] simulation_func finished")
-            print(f"    takes {time.perf_counter() - t_start:.3f}s")
-            print(f"    ideal {state._t / self.throttle:.3f}s")
+            self._stopped_from = None
+        return False
 
     def _call_command_func(self) -> bool:
         # simlationが始まるまで待つ（sim_threadが例外等で終了した場合もここで止まり続けないようalive()も見る）
@@ -831,22 +934,39 @@ class CarSim:
                 state._t_last_auto_w_calc_end = None
                 time.sleep(0)  # GILを開放し他のスレッドの処理を進める
             else:
-                if state._t_last_auto_w_calc_start is not None:
-                    should_wait_sim_sec = (
-                        state._t_last_auto_w_calc_start
-                        + self.auto_control_dt
-                        - state._t
-                    )
-                    if should_wait_sim_sec < -self.auto_control_dt * 0.2:
-                        print(
-                            f"[{self.share.state._t:.3f}] WARN: auto_w calc takes time. should decrease throttle"
-                        )
-                    if should_wait_sim_sec > 0:
-                        time.sleep(should_wait_sim_sec / self.throttle / 10)
-                        continue
+                if self._wait_for_next_calc_auto_w():
+                    continue
                 state._t_last_auto_w_calc_start = state._t
                 self.predict_w = self._calc_auto_w()
+                print(f"[{self.share.state._t:.3f}] predict auto_w: {self.predict_w}")
                 state._t_last_auto_w_calc_end = state._t
+
+    def _wait_for_next_calc_auto_w(self):
+        state = self.share.state
+        if self.real_sim_mode:
+            if state._t_last_auto_w_calc_start is not None:
+                should_wait_sim_sec = (
+                    state._t_last_auto_w_calc_start + self.auto_control_dt - state._t
+                )
+                if should_wait_sim_sec < -self.auto_control_dt * 0.2:
+                    print(
+                        f"[{self.share.state._t:.3f}] WARN: auto_w calc takes time. should decrease throttle"
+                    )
+                if should_wait_sim_sec > 0:
+                    time.sleep(
+                        should_wait_sim_sec / self.throttle / 10
+                        if self.real_sim_mode
+                        else 0
+                    )
+                    return True
+        else:
+            if (
+                state._t_last_auto_w_calc_end is not None
+                and state._t_last_auto_w_calc_end + self.auto_control_dt > state._t
+            ):
+                time.sleep(0)
+                return True
+        return False
 
     def alive(self) -> bool:
         return not self.share.stop_event.is_set()
