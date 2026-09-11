@@ -39,7 +39,7 @@ class MissionBase:
         self.world = world
 
         # 変更可能な変数
-        self.initial_cam_pitch_deg = 30  # 30度
+        self.initial_cam_pitch_deg = 30
         self.initial_xy = (0, 0)
         self.initial_yaw_deg = 0
         self.random_d_xy = (0.0, 0.0)
